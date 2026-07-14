@@ -7,7 +7,7 @@ import secrets
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
@@ -380,9 +380,9 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
     """
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def kok():
-    return "<p>Bu bir API sunucusudur. Yönetim paneli için <a href='/admin'>/admin</a> adresine gidin.</p>"
+    return RedirectResponse(url="/admin")
 
 
 if __name__ == "__main__":
