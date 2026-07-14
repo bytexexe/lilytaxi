@@ -1,30 +1,146 @@
+import base64
+import hashlib
 import json
 import math
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import os
+import secrets
+
+import asyncpg
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 
 app = FastAPI()
 
-# Aktif sürücülerin anlık konumları ve hatları burada tutulur
+# --- AYARLAR ---
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "degistir_bunu")
+PASSWORD_SALT = os.environ.get("PASSWORD_SALT", "lilytaxi_varsayilan_tuz_degistir")
+
+# Aktif (bağlı) sürücülerin anlık konumları burada tutulur (RAM, kalıcı değil)
 DRIVERS = {}
+
+DB_POOL = None
+security = HTTPBasic()
+
+
+def sifre_hashle(sifre: str) -> str:
+    return hashlib.sha256((sifre + PASSWORD_SALT).encode()).hexdigest()
+
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """İki koordinat arasındaki mesafeyi (KM) Haversine formülü ile hesaplar."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(
+        math.radians(lat2)
+    ) * math.sin(dlon / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
-# --- ŞOFÖR WEBSOCKET BAĞLANTISI ---
-@app.websocket("/ws/surucu/{surucu_id}")
-async def surucu_websocket(websocket: WebSocket, surucu_id: str):
-    await websocket.accept()
-    DRIVERS[surucu_id] = {"lat": 0.0, "lng": 0.0, "status": "Musait", "websocket": websocket}
-    print(f" Sürücü bağlandı: {surucu_id}")
-    
+
+def admin_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    dogru_kullanici = secrets.compare_digest(credentials.username, ADMIN_USER)
+    dogru_sifre = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+    if not (dogru_kullanici and dogru_sifre):
+        raise HTTPException(
+            status_code=401,
+            detail="Yetkisiz",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return True
+
+
+def ws_admin_auth(auth_header: str) -> bool:
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
     try:
+        decoded = base64.b64decode(auth_header[6:]).decode()
+        kullanici, _, sifre = decoded.partition(":")
+        return secrets.compare_digest(kullanici, ADMIN_USER) and secrets.compare_digest(
+            sifre, ADMIN_PASSWORD
+        )
+    except Exception:
+        return False
+
+
+@app.on_event("startup")
+async def startup():
+    global DB_POOL
+    db_url = os.environ.get("DATABASE_URL", "")
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+    if not db_url:
+        raise RuntimeError("DATABASE_URL ortam değişkeni bulunamadı!")
+    DB_POOL = await asyncpg.create_pool(db_url)
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drivers (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT now()
+            )
+            """
+        )
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if DB_POOL:
+        await DB_POOL.close()
+
+
+# --- ŞOFÖR WEBSOCKET BAĞLANTISI (kullanıcı adı/şifre ile giriş) ---
+@app.websocket("/ws/surucu")
+async def surucu_websocket(websocket: WebSocket):
+    await websocket.accept()
+    surucu_id = None
+    try:
+        ilk_mesaj = await websocket.receive_text()
+        giris = json.loads(ilk_mesaj)
+        kullanici_adi = giris.get("kullanici_adi", "")
+        sifre = giris.get("sifre", "")
+
+        async with DB_POOL.acquire() as conn:
+            kayit = await conn.fetchrow(
+                "SELECT username, display_name, password_hash FROM drivers WHERE username=$1",
+                kullanici_adi,
+            )
+
+        if not kayit or kayit["password_hash"] != sifre_hashle(sifre):
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "tip": "giris_sonucu",
+                        "basarili": False,
+                        "mesaj": "Kullanıcı adı veya şifre hatalı",
+                    }
+                )
+            )
+            await websocket.close()
+            return
+
+        await websocket.send_text(
+            json.dumps(
+                {"tip": "giris_sonucu", "basarili": True, "isim": kayit["display_name"]}
+            )
+        )
+
+        surucu_id = kullanici_adi
+        DRIVERS[surucu_id] = {
+            "lat": 0.0,
+            "lng": 0.0,
+            "status": "Musait",
+            "websocket": websocket,
+            "isim": kayit["display_name"],
+        }
+        print(f" Sürücü giriş yaptı: {surucu_id}")
+
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
@@ -33,13 +149,22 @@ async def surucu_websocket(websocket: WebSocket, surucu_id: str):
                 DRIVERS[surucu_id]["lng"] = payload.get("lng", 0.0)
                 DRIVERS[surucu_id]["status"] = payload.get("status", "Musait")
     except WebSocketDisconnect:
-        print(f" Sürücü koptu: {surucu_id}")
-        if surucu_id in DRIVERS:
+        pass
+    except Exception as e:
+        print(f" Şoför websocket hatası: {e}")
+    finally:
+        if surucu_id and surucu_id in DRIVERS:
             del DRIVERS[surucu_id]
+            print(f" Sürücü koptu: {surucu_id}")
 
-# --- YÖNETİCİ PANELİ BAĞLANTISI ---
-@app.websocket("/ws/admin")
+
+# --- YÖNETİCİ PANELİ WEBSOCKET (şifre korumalı) ---
+@app.websocket("/admin/ws")
 async def admin_websocket(websocket: WebSocket):
+    if not ws_admin_auth(websocket.headers.get("authorization")):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     try:
         while True:
@@ -47,29 +172,90 @@ async def admin_websocket(websocket: WebSocket):
             payload = json.loads(data)
             t_lat = payload["target_lat"]
             t_lng = payload["target_lng"]
-            
+
             en_yakin_surucu = None
-            en_kisa_mesafe = float('inf')
-            
+            en_kisa_mesafe = float("inf")
+
             for s_id, info in DRIVERS.items():
                 if info["status"] == "Musait":
                     mesafe = calculate_distance(t_lat, t_lng, info["lat"], info["lng"])
                     if mesafe < en_kisa_mesafe:
                         en_kisa_mesafe = mesafe
                         en_yakin_surucu = s_id
-            
+
             if en_yakin_surucu and DRIVERS[en_yakin_surucu]["websocket"]:
                 is_emri = {"is_tipi": "YENI_CAGRI", "musteri_lat": t_lat, "musteri_lng": t_lng}
                 await DRIVERS[en_yakin_surucu]["websocket"].send_text(json.dumps(is_emri))
-                await websocket.send_text(json.dumps({"bilgi": f"İş {en_yakin_surucu} sürücüsüne gönderildi! Mesafe: {round(en_kisa_mesafe,2)} km"}))
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "bilgi": f"İş {en_yakin_surucu} sürücüsüne gönderildi! Mesafe: {round(en_kisa_mesafe,2)} km"
+                        }
+                    )
+                )
             else:
                 await websocket.send_text(json.dumps({"bilgi": "Etrafta müsait sürücü bulunamadı!"}))
     except WebSocketDisconnect:
         pass
 
-# --- HARİTALI WEB ARAYÜZÜ ---
-@app.get("/", response_class=HTMLResponse)
-async def get_admin_panel():
+
+# --- SÜRÜCÜ HESABI EKLE / LİSTELE / SİL (admin şifreli) ---
+class YeniSurucu(BaseModel):
+    kullanici_adi: str
+    sifre: str
+    isim: str
+
+
+@app.post("/admin/api/drivers")
+async def surucu_ekle(surucu: YeniSurucu, yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO drivers (username, password_hash, display_name) VALUES ($1, $2, $3)",
+                surucu.kullanici_adi,
+                sifre_hashle(surucu.sifre),
+                surucu.isim,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten kayıtlı")
+    return {"basarili": True}
+
+
+@app.get("/admin/api/drivers")
+async def surucu_listele(yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        kayitlar = await conn.fetch(
+            "SELECT id, username, display_name, created_at FROM drivers ORDER BY id DESC"
+        )
+    return [
+        {
+            "id": k["id"],
+            "kullanici_adi": k["username"],
+            "isim": k["display_name"],
+            "olusturma": k["created_at"].isoformat(),
+        }
+        for k in kayitlar
+    ]
+
+
+@app.delete("/admin/api/drivers/{driver_id}")
+async def surucu_sil(driver_id: int, yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute("DELETE FROM drivers WHERE id=$1", driver_id)
+    return {"basarili": True}
+
+
+@app.get("/admin/api/suruculer")
+async def aktif_suruculer(yetki: bool = Depends(admin_auth)):
+    return {
+        s_id: {"lat": info["lat"], "lng": info["lng"], "status": info["status"], "isim": info["isim"]}
+        for s_id, info in DRIVERS.items()
+    }
+
+
+# --- HARİTALI WEB ARAYÜZÜ (şifre korumalı) ---
+@app.get("/admin", response_class=HTMLResponse)
+async def get_admin_panel(yetki: bool = Depends(admin_auth)):
     return """
     <!DOCTYPE html>
     <html>
@@ -78,21 +264,42 @@ async def get_admin_panel():
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <style>
-            #map { height: 85vh; width: 100%; }
+            body { font-family: sans-serif; margin: 0; }
+            #map { height: 65vh; width: 100%; }
             #log { height: 10vh; background: #222; color: #0f0; padding: 10px; overflow-y: scroll; font-family: monospace; }
+            #panel { padding: 12px; background: #f4f4f4; }
+            #panel input { padding: 6px; margin-right: 6px; }
+            #panel button { padding: 6px 12px; }
+            #surucuListesi { padding: 0 12px 12px; }
+            #surucuListesi table { border-collapse: collapse; width: 100%; }
+            #surucuListesi td, #surucuListesi th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 14px; }
         </style>
     </head>
     <body>
-        <h3 style="margin:5px;">Canlı Takip Paneli (İş Göndermek İçin Haritaya Tıklayın)</h3>
+        <h3 style="margin:8px;">Canlı Takip Paneli (İş Göndermek İçin Haritaya Tıklayın)</h3>
         <div id="map"></div>
         <div id="log">Sistem hazır. Şoförlerin bağlanması bekleniyor...</div>
+
+        <div id="panel">
+            <b>Yeni Sürücü Ekle:</b><br><br>
+            <input id="yeniKullaniciAdi" placeholder="Kullanıcı adı" />
+            <input id="yeniSifre" placeholder="Şifre" type="password" />
+            <input id="yeniIsim" placeholder="Görünen isim / tabela" />
+            <button onclick="surucuEkle()">Ekle</button>
+            <span id="ekleSonuc"></span>
+        </div>
+        <div id="surucuListesi">
+            <b>Kayıtlı Sürücüler:</b>
+            <table id="tabloSurucular"><thead><tr><th>Kullanıcı Adı</th><th>İsim</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+
         <script>
             var map = L.map('map').setView([41.0082, 28.9784], 11);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             var surucuMarkerlari = {};
             var logDiv = document.getElementById('log');
-            var ws = new WebSocket("ws://" + window.location.host + "/ws/admin");
-            
+            var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
+
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
                 if(data.bilgi) { logDiv.innerHTML += "<br>> " + data.bilgi; logDiv.scrollTop = logDiv.scrollHeight; }
@@ -104,30 +311,82 @@ async def get_admin_panel():
                 ws.send(JSON.stringify({target_lat: c.lat, target_lng: c.lng}));
             });
 
-            setInterval(function() {
-                fetch('/api/suruculer').then(res => res.json()).then(suruculer => {
+            function suruculeriGuncelle() {
+                fetch('/admin/api/suruculer').then(res => res.json()).then(suruculer => {
                     for (var id in suruculer) {
                         var s = suruculer[id];
                         if (s.lat === 0) continue;
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
                         } else {
-                            surucuMarkerlari[id] = L.marker([s.lat, s.lng]).addTo(map).bindPopup(id).openPopup();
+                            surucuMarkerlari[id] = L.marker([s.lat, s.lng]).addTo(map).bindPopup(s.isim || id).openPopup();
                         }
                     }
                 });
-            }, 3000);
+            }
+            setInterval(suruculeriGuncelle, 3000);
+            suruculeriGuncelle();
+
+            function surucuListesiniYukle() {
+                fetch('/admin/api/drivers').then(res => res.json()).then(liste => {
+                    var tbody = document.querySelector('#tabloSurucular tbody');
+                    tbody.innerHTML = '';
+                    liste.forEach(function(s) {
+                        var tr = document.createElement('tr');
+                        tr.innerHTML = '<td>' + s.kullanici_adi + '</td><td>' + s.isim + '</td>' +
+                            '<td><button onclick="surucuSil(' + s.id + ')">Sil</button></td>';
+                        tbody.appendChild(tr);
+                    });
+                });
+            }
+
+            function surucuEkle() {
+                var kullaniciAdi = document.getElementById('yeniKullaniciAdi').value.trim();
+                var sifre = document.getElementById('yeniSifre').value;
+                var isim = document.getElementById('yeniIsim').value.trim();
+                if (!kullaniciAdi || !sifre || !isim) {
+                    document.getElementById('ekleSonuc').innerText = ' Tüm alanları doldur.';
+                    return;
+                }
+                fetch('/admin/api/drivers', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({kullanici_adi: kullaniciAdi, sifre: sifre, isim: isim})
+                }).then(res => res.json().then(data => ({status: res.status, data: data})))
+                  .then(({status, data}) => {
+                    if (status === 200) {
+                        document.getElementById('ekleSonuc').innerText = ' Eklendi!';
+                        document.getElementById('yeniKullaniciAdi').value = '';
+                        document.getElementById('yeniSifre').value = '';
+                        document.getElementById('yeniIsim').value = '';
+                        surucuListesiniYukle();
+                    } else {
+                        document.getElementById('ekleSonuc').innerText = ' Hata: ' + (data.detail || 'bilinmeyen hata');
+                    }
+                  });
+            }
+
+            function surucuSil(id) {
+                if (!confirm('Bu sürücüyü silmek istediğine emin misin?')) return;
+                fetch('/admin/api/drivers/' + id, {method: 'DELETE'}).then(function() {
+                    surucuListesiniYukle();
+                });
+            }
+
+            surucuListesiniYukle();
         </script>
     </body>
     </html>
     """
 
-@app.get("/api/suruculer")
-async def get_drivers_api():
-    return {s_id: {"lat": info["lat"], "lng": info["lng"], "status": info["status"]} for s_id, info in DRIVERS.items()}
+
+@app.get("/", response_class=HTMLResponse)
+async def kok():
+    return "<p>Bu bir API sunucusudur. Yönetim paneli için <a href='/admin'>/admin</a> adresine gidin.</p>"
+
 
 if __name__ == "__main__":
-    import os
     import uvicorn
+
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
