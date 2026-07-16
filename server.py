@@ -20,6 +20,8 @@ PASSWORD_SALT = os.environ.get("PASSWORD_SALT", "lilytaxi_varsayilan_tuz_degisti
 
 # Aktif (bağlı) sürücülerin anlık konumları burada tutulur (RAM, kalıcı değil)
 DRIVERS = {}
+# Şu an açık olan admin panel bağlantıları (bildirim yayınlamak için)
+ADMIN_SOCKETS = []
 
 DB_POOL = None
 security = HTTPBasic()
@@ -39,6 +41,18 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     ) * math.sin(dlon / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+
+async def adminlere_yayinla(mesaj: str):
+    kopmus_soketler = []
+    for soket in ADMIN_SOCKETS:
+        try:
+            await soket.send_text(json.dumps({"bilgi": mesaj}))
+        except Exception:
+            kopmus_soketler.append(soket)
+    for soket in kopmus_soketler:
+        if soket in ADMIN_SOCKETS:
+            ADMIN_SOCKETS.remove(soket)
 
 
 def admin_auth(credentials: HTTPBasicCredentials = Depends(security)):
@@ -144,6 +158,13 @@ async def surucu_websocket(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
+
+            if payload.get("tip") == "bildirim":
+                mesaj = payload.get("mesaj", "")
+                isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
+                await adminlere_yayinla(f"[{isim}] {mesaj}")
+                continue
+
             if surucu_id in DRIVERS:
                 DRIVERS[surucu_id]["lat"] = payload.get("lat", 0.0)
                 DRIVERS[surucu_id]["lng"] = payload.get("lng", 0.0)
@@ -166,6 +187,7 @@ async def admin_websocket(websocket: WebSocket):
         return
 
     await websocket.accept()
+    ADMIN_SOCKETS.append(websocket)
     try:
         while True:
             data = await websocket.receive_text()
@@ -208,6 +230,9 @@ async def admin_websocket(websocket: WebSocket):
             )
     except WebSocketDisconnect:
         pass
+    finally:
+        if websocket in ADMIN_SOCKETS:
+            ADMIN_SOCKETS.remove(websocket)
 
 
 # --- SÜRÜCÜ HESABI EKLE / LİSTELE / SİL (admin şifreli) ---
