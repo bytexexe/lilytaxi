@@ -170,13 +170,21 @@ async def admin_websocket(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
-            t_lat = payload["target_lat"]
-            t_lng = payload["target_lng"]
             hedef_surucu = payload.get("hedef_surucu")
+            nereden = payload.get("nereden", "").strip()
+            nereye = payload.get("nereye", "").strip()
+            fiyat = payload.get("fiyat", "").strip()
+            numara = payload.get("numara", "").strip()
 
             if not hedef_surucu:
                 await websocket.send_text(
                     json.dumps({"bilgi": "Önce bir sürücü seçmelisin."})
+                )
+                continue
+
+            if not (nereden and nereye and fiyat and numara):
+                await websocket.send_text(
+                    json.dumps({"bilgi": "Tüm alanları doldurmalısın (Nereden, Nereye, Fiyat, Numara)."})
                 )
                 continue
 
@@ -187,15 +195,16 @@ async def admin_websocket(websocket: WebSocket):
                 )
                 continue
 
-            mesafe = calculate_distance(t_lat, t_lng, info["lat"], info["lng"])
-            is_emri = {"is_tipi": "YENI_CAGRI", "musteri_lat": t_lat, "musteri_lng": t_lng}
+            is_emri = {
+                "is_tipi": "YENI_CAGRI",
+                "nereden": nereden,
+                "nereye": nereye,
+                "fiyat": fiyat,
+                "numara": numara,
+            }
             await info["websocket"].send_text(json.dumps(is_emri))
             await websocket.send_text(
-                json.dumps(
-                    {
-                        "bilgi": f"İş {hedef_surucu} sürücüsüne gönderildi! Mesafe: {round(mesafe,2)} km"
-                    }
-                )
+                json.dumps({"bilgi": f"İş {hedef_surucu} sürücüsüne gönderildi!"})
             )
     except WebSocketDisconnect:
         pass
@@ -275,12 +284,45 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             #surucuListesi { padding: 0 12px 12px; }
             #surucuListesi table { border-collapse: collapse; width: 100%; }
             #surucuListesi td, #surucuListesi th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 14px; }
+            #isFormuOrtusu {
+                display: none;
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.5);
+                align-items: center; justify-content: center;
+                z-index: 1000;
+            }
+            #isFormuKutu {
+                background: white; padding: 20px; border-radius: 8px;
+                width: 320px; max-width: 90%;
+            }
+            #isFormuKutu h4 { margin-top: 0; }
+            #isFormuKutu label { display: block; margin-top: 10px; font-size: 13px; font-weight: bold; }
+            #isFormuKutu input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+            #isFormuKutu .butonlar { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
         </style>
     </head>
     <body>
-        <h3 style="margin:8px;">Canlı Takip Paneli (İş Göndermek İçin Haritaya Tıklayın)</h3>
+        <h3 style="margin:8px;">Canlı Takip Paneli (İş Vermek İçin Bir Sürücüye Tıklayın)</h3>
         <div id="map"></div>
         <div id="log">Sistem hazır. Şoförlerin bağlanması bekleniyor...</div>
+
+        <div id="isFormuOrtusu">
+            <div id="isFormuKutu">
+                <h4 id="isFormuBaslik">İş Ver</h4>
+                <label>Nereden:</label>
+                <input id="formNereden" placeholder="örn. Kadıköy İskele" />
+                <label>Nereye:</label>
+                <input id="formNereye" placeholder="örn. Taksim Meydanı" />
+                <label>Fiyat:</label>
+                <input id="formFiyat" placeholder="örn. 450 TL" />
+                <label>Numara:</label>
+                <input id="formNumara" placeholder="örn. 0532 000 00 00" />
+                <div class="butonlar">
+                    <button onclick="isFormuKapat()">İptal</button>
+                    <button onclick="isFormuGonder()">Gönder</button>
+                </div>
+            </div>
+        </div>
 
         <div id="panel">
             <b>Yeni Sürücü Ekle:</b><br><br>
@@ -299,8 +341,7 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             var map = L.map('map').setView([41.0082, 28.9784], 11);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             var surucuMarkerlari = {};
-            var musteriMarker = null;
-            var secilenMusteriKonumu = null;
+            var secilenSurucuId = null;
             var logDiv = document.getElementById('log');
             var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
 
@@ -309,35 +350,41 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 if(data.bilgi) { logDiv.innerHTML += "<br>> " + data.bilgi; logDiv.scrollTop = logDiv.scrollHeight; }
             };
 
-            var musteriIkon = L.divIcon({
-                html: '📍',
-                className: '',
-                iconSize: [24, 24],
-                iconAnchor: [12, 24]
-            });
+            function isVerFormAc(surucuId, surucuIsim) {
+                secilenSurucuId = surucuId;
+                document.getElementById('isFormuBaslik').innerText = 'İş Ver: ' + surucuIsim;
+                document.getElementById('formNereden').value = '';
+                document.getElementById('formNereye').value = '';
+                document.getElementById('formFiyat').value = '';
+                document.getElementById('formNumara').value = '';
+                document.getElementById('isFormuOrtusu').style.display = 'flex';
+            }
 
-            map.on('click', function(e) {
-                var c = e.latlng;
-                secilenMusteriKonumu = {lat: c.lat, lng: c.lng};
-                if (musteriMarker) {
-                    musteriMarker.setLatLng(c);
-                } else {
-                    musteriMarker = L.marker(c, {icon: musteriIkon}).addTo(map);
-                }
-                logDiv.innerHTML += "<br>> Müşteri konumu seçildi: " + c.lat.toFixed(4) + ", " + c.lng.toFixed(4) + " — şimdi bir sürücüye tıklayıp 'İş Ver' de.";
-                logDiv.scrollTop = logDiv.scrollHeight;
-            });
+            function isFormuKapat() {
+                document.getElementById('isFormuOrtusu').style.display = 'none';
+                secilenSurucuId = null;
+            }
 
-            function isVer(surucuId) {
-                if (!secilenMusteriKonumu) {
-                    alert('Önce haritada müşteri konumunu seç (haritaya tıkla).');
+            function isFormuGonder() {
+                var nereden = document.getElementById('formNereden').value.trim();
+                var nereye = document.getElementById('formNereye').value.trim();
+                var fiyat = document.getElementById('formFiyat').value.trim();
+                var numara = document.getElementById('formNumara').value.trim();
+
+                if (!nereden || !nereye || !fiyat || !numara) {
+                    alert('Lütfen tüm alanları doldur: Nereden, Nereye, Fiyat, Numara.');
                     return;
                 }
+
                 ws.send(JSON.stringify({
-                    target_lat: secilenMusteriKonumu.lat,
-                    target_lng: secilenMusteriKonumu.lng,
-                    hedef_surucu: surucuId
+                    hedef_surucu: secilenSurucuId,
+                    nereden: nereden,
+                    nereye: nereye,
+                    fiyat: fiyat,
+                    numara: numara
                 }));
+
+                isFormuKapat();
             }
 
             function suruculeriGuncelle() {
@@ -345,9 +392,10 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                     for (var id in suruculer) {
                         var s = suruculer[id];
                         if (s.lat === 0) continue;
-                        var popupHtml = '<b>' + (s.isim || id) + '</b><br>' +
+                        var isim = s.isim || id;
+                        var popupHtml = '<b>' + isim + '</b><br>' +
                             'Durum: ' + s.status + '<br>' +
-                            '<button onclick="isVer(&quot;' + id + '&quot;)">İş Ver</button>';
+                            '<button onclick="isVerFormAc(&quot;' + id + '&quot;, &quot;' + isim + '&quot;)">İş Ver</button>';
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
                             surucuMarkerlari[id].setPopupContent(popupHtml);
