@@ -473,42 +473,54 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 font-size: 13px;
             }
             #ekleSonuc { font-size: 12px; color: #94a3b8; margin-top: 4px; }
-            #surucuKartlariSarmalayici {
+            #surucuListesiPaneli {
                 flex: 1;
-                overflow-x: auto;
-                overflow-y: hidden;
-                padding-bottom: 8px;
-            }
-            #surucuKartlari {
-                display: flex;
-                gap: 12px;
-                height: 220px;
-            }
-            .surucuKart {
                 background: #1e293b;
                 border-radius: 12px;
-                padding: 16px;
+                padding: 18px;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-                width: 190px;
-                height: 220px;
-                flex-shrink: 0;
+                height: 320px;
                 display: flex;
                 flex-direction: column;
-                justify-content: space-between;
             }
-            .surucuKart .isim { font-weight: 700; color: #f1f5f9; font-size: 15px; margin-bottom: 8px; word-break: break-word; }
-            .surucuKart .satirEtiket { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 8px; }
-            .surucuKart .satirDeger { font-size: 13.5px; color: #cbd5e1; word-break: break-word; }
-            .surucuKart button {
-                margin-top: 10px;
-                padding: 7px 10px;
+            #surucuListesiPaneli h4 { margin: 0 0 10px; color: #f1f5f9; font-size: 14px; }
+            #surucuArama {
+                padding: 9px 12px;
                 border-radius: 8px;
+                border: 1px solid #334155;
+                background: #0f172a;
+                color: #e2e8f0;
+                font-size: 13px;
+                margin-bottom: 10px;
+            }
+            #surucuSatirlari {
+                overflow-y: auto;
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .surucuSatir {
+                background: #0f172a;
+                border-radius: 8px;
+                padding: 10px 12px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 10px;
+            }
+            .surucuSatir .bilgi { font-size: 13px; color: #cbd5e1; line-height: 1.5; }
+            .surucuSatir .bilgi b { color: #f1f5f9; font-size: 14px; }
+            .surucuSatir button {
+                padding: 7px 12px;
+                border-radius: 6px;
                 border: none;
                 background: #dc2626;
                 color: white;
                 cursor: pointer;
                 font-size: 12px;
                 font-weight: 600;
+                flex-shrink: 0;
             }
             #isFormuOrtusu {
                 display: none;
@@ -575,8 +587,10 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 </div>
                 <div id="ekleSonuc"></div>
             </div>
-            <div id="surucuKartlariSarmalayici">
-                <div id="surucuKartlari"></div>
+            <div id="surucuListesiPaneli">
+                <h4>Kayıtlı Sürücüler</h4>
+                <input id="surucuArama" placeholder="Sürücü ara (isim veya kullanıcı adı)..." oninput="surucuListesiniFiltreleVeGoster()" />
+                <div id="surucuSatirlari"></div>
             </div>
         </div>
 
@@ -685,28 +699,35 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             setInterval(suruculeriGuncelle, 3000);
             suruculeriGuncelle();
 
+            var tumSuruculerListesi = [];
+
             function surucuListesiniYukle() {
                 fetch('/admin/api/drivers').then(res => res.json()).then(liste => {
-                    var kapsayici = document.getElementById('surucuKartlari');
-                    kapsayici.innerHTML = '';
-                    if (liste.length === 0) {
-                        kapsayici.innerHTML = '<div style="color:#64748b; font-size:13px; padding-top: 90px;">Henüz kayıtlı sürücü yok.</div>';
-                        return;
-                    }
-                    liste.forEach(function(s) {
-                        var kart = document.createElement('div');
-                        kart.className = 'surucuKart';
-                        kart.innerHTML =
-                            '<div>' +
-                            '<div class="isim">' + s.isim + '</div>' +
-                            '<div class="satirEtiket">Kullanıcı Adı</div>' +
-                            '<div class="satirDeger">' + s.kullanici_adi + '</div>' +
-                            '<div class="satirEtiket">Şifre</div>' +
-                            '<div class="satirDeger">' + s.sifre + '</div>' +
-                            '</div>' +
-                            '<button onclick="surucuSil(' + s.id + ')">Sil</button>';
-                        kapsayici.appendChild(kart);
-                    });
+                    tumSuruculerListesi = liste;
+                    surucuListesiniFiltreleVeGoster();
+                });
+            }
+
+            function surucuListesiniFiltreleVeGoster() {
+                var arama = document.getElementById('surucuArama').value.trim().toLowerCase();
+                var filtreli = tumSuruculerListesi.filter(function(s) {
+                    return s.isim.toLowerCase().indexOf(arama) !== -1 ||
+                           s.kullanici_adi.toLowerCase().indexOf(arama) !== -1;
+                });
+                var kapsayici = document.getElementById('surucuSatirlari');
+                kapsayici.innerHTML = '';
+                if (filtreli.length === 0) {
+                    kapsayici.innerHTML = '<div style="color:#64748b; font-size:13px;">Sonuç bulunamadı.</div>';
+                    return;
+                }
+                filtreli.forEach(function(s) {
+                    var satir = document.createElement('div');
+                    satir.className = 'surucuSatir';
+                    satir.innerHTML =
+                        '<div class="bilgi"><b>' + s.isim + '</b><br>' +
+                        s.kullanici_adi + ' &middot; ' + s.sifre + '</div>' +
+                        '<button onclick="surucuSil(' + s.id + ')">Sil</button>';
+                    kapsayici.appendChild(satir);
                 });
             }
 
