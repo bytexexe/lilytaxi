@@ -172,29 +172,31 @@ async def admin_websocket(websocket: WebSocket):
             payload = json.loads(data)
             t_lat = payload["target_lat"]
             t_lng = payload["target_lng"]
+            hedef_surucu = payload.get("hedef_surucu")
 
-            en_yakin_surucu = None
-            en_kisa_mesafe = float("inf")
-
-            for s_id, info in DRIVERS.items():
-                if info["status"] == "Musait":
-                    mesafe = calculate_distance(t_lat, t_lng, info["lat"], info["lng"])
-                    if mesafe < en_kisa_mesafe:
-                        en_kisa_mesafe = mesafe
-                        en_yakin_surucu = s_id
-
-            if en_yakin_surucu and DRIVERS[en_yakin_surucu]["websocket"]:
-                is_emri = {"is_tipi": "YENI_CAGRI", "musteri_lat": t_lat, "musteri_lng": t_lng}
-                await DRIVERS[en_yakin_surucu]["websocket"].send_text(json.dumps(is_emri))
+            if not hedef_surucu:
                 await websocket.send_text(
-                    json.dumps(
-                        {
-                            "bilgi": f"İş {en_yakin_surucu} sürücüsüne gönderildi! Mesafe: {round(en_kisa_mesafe,2)} km"
-                        }
-                    )
+                    json.dumps({"bilgi": "Önce bir sürücü seçmelisin."})
                 )
-            else:
-                await websocket.send_text(json.dumps({"bilgi": "Etrafta müsait sürücü bulunamadı!"}))
+                continue
+
+            info = DRIVERS.get(hedef_surucu)
+            if not info or not info.get("websocket"):
+                await websocket.send_text(
+                    json.dumps({"bilgi": f"{hedef_surucu} adlı sürücü şu an bağlı değil."})
+                )
+                continue
+
+            mesafe = calculate_distance(t_lat, t_lng, info["lat"], info["lng"])
+            is_emri = {"is_tipi": "YENI_CAGRI", "musteri_lat": t_lat, "musteri_lng": t_lng}
+            await info["websocket"].send_text(json.dumps(is_emri))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "bilgi": f"İş {hedef_surucu} sürücüsüne gönderildi! Mesafe: {round(mesafe,2)} km"
+                    }
+                )
+            )
     except WebSocketDisconnect:
         pass
 
@@ -297,6 +299,8 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             var map = L.map('map').setView([41.0082, 28.9784], 11);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             var surucuMarkerlari = {};
+            var musteriMarker = null;
+            var secilenMusteriKonumu = null;
             var logDiv = document.getElementById('log');
             var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
 
@@ -305,21 +309,57 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 if(data.bilgi) { logDiv.innerHTML += "<br>> " + data.bilgi; logDiv.scrollTop = logDiv.scrollHeight; }
             };
 
+            var musteriIkon = L.divIcon({
+                html: '📍',
+                className: '',
+                iconSize: [24, 24],
+                iconAnchor: [12, 24]
+            });
+
             map.on('click', function(e) {
                 var c = e.latlng;
-                logDiv.innerHTML += "<br>> Konum Seçildi: " + c.lat.toFixed(4) + ", " + c.lng.toFixed(4);
-                ws.send(JSON.stringify({target_lat: c.lat, target_lng: c.lng}));
+                secilenMusteriKonumu = {lat: c.lat, lng: c.lng};
+                if (musteriMarker) {
+                    musteriMarker.setLatLng(c);
+                } else {
+                    musteriMarker = L.marker(c, {icon: musteriIkon}).addTo(map);
+                }
+                logDiv.innerHTML += "<br>> Müşteri konumu seçildi: " + c.lat.toFixed(4) + ", " + c.lng.toFixed(4) + " — şimdi bir sürücüye tıklayıp 'İş Ver' de.";
+                logDiv.scrollTop = logDiv.scrollHeight;
             });
+
+            function isVer(surucuId) {
+                if (!secilenMusteriKonumu) {
+                    alert('Önce haritada müşteri konumunu seç (haritaya tıkla).');
+                    return;
+                }
+                ws.send(JSON.stringify({
+                    target_lat: secilenMusteriKonumu.lat,
+                    target_lng: secilenMusteriKonumu.lng,
+                    hedef_surucu: surucuId
+                }));
+            }
 
             function suruculeriGuncelle() {
                 fetch('/admin/api/suruculer').then(res => res.json()).then(suruculer => {
                     for (var id in suruculer) {
                         var s = suruculer[id];
                         if (s.lat === 0) continue;
+                        var popupHtml = '<b>' + (s.isim || id) + '</b><br>' +
+                            'Durum: ' + s.status + '<br>' +
+                            '<button onclick="isVer(\'' + id + '\')">İş Ver</button>';
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
+                            surucuMarkerlari[id].setPopupContent(popupHtml);
                         } else {
-                            surucuMarkerlari[id] = L.marker([s.lat, s.lng]).addTo(map).bindPopup(s.isim || id).openPopup();
+                            surucuMarkerlari[id] = L.marker([s.lat, s.lng]).addTo(map).bindPopup(popupHtml);
+                        }
+                    }
+                    // Artık bağlı olmayan sürücülerin ikonlarını kaldır
+                    for (var id in surucuMarkerlari) {
+                        if (!suruculer[id]) {
+                            map.removeLayer(surucuMarkerlari[id]);
+                            delete surucuMarkerlari[id];
                         }
                     }
                 });
