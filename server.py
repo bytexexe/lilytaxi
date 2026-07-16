@@ -345,6 +345,17 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             var logDiv = document.getElementById('log');
             var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
 
+            var maviIkon = L.icon({
+                iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-blue.png',
+                shadowUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-shadow.png',
+                iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41]
+            });
+            var kirmiziIkon = L.icon({
+                iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-red.png',
+                shadowUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-shadow.png',
+                iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41]
+            });
+
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
                 if(data.bilgi) { logDiv.innerHTML += "<br>> " + data.bilgi; logDiv.scrollTop = logDiv.scrollHeight; }
@@ -393,14 +404,16 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                         var s = suruculer[id];
                         if (s.lat === 0) continue;
                         var isim = s.isim || id;
+                        var ikon = (s.status === 'Musait') ? maviIkon : kirmiziIkon;
                         var popupHtml = '<b>' + isim + '</b><br>' +
                             'Durum: ' + s.status + '<br>' +
                             '<button onclick="isVerFormAc(&quot;' + id + '&quot;, &quot;' + isim + '&quot;)">İş Ver</button>';
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
                             surucuMarkerlari[id].setPopupContent(popupHtml);
+                            surucuMarkerlari[id].setIcon(ikon);
                         } else {
-                            surucuMarkerlari[id] = L.marker([s.lat, s.lng]).addTo(map).bindPopup(popupHtml);
+                            surucuMarkerlari[id] = L.marker([s.lat, s.lng], {icon: ikon}).addTo(map).bindPopup(popupHtml);
                         }
                     }
                     // Artık bağlı olmayan sürücülerin ikonlarını kaldır
