@@ -101,6 +101,20 @@ async def startup():
             )
             """
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id SERIAL PRIMARY KEY,
+                driver_username TEXT NOT NULL,
+                nereden TEXT NOT NULL,
+                nereye TEXT NOT NULL,
+                fiyat TEXT NOT NULL,
+                numara TEXT NOT NULL,
+                durum TEXT NOT NULL DEFAULT 'bekliyor',
+                created_at TIMESTAMP DEFAULT now()
+            )
+            """
+        )
 
 
 @app.on_event("shutdown")
@@ -155,6 +169,31 @@ async def surucu_websocket(websocket: WebSocket):
         }
         print(f" Sürücü giriş yaptı: {surucu_id}")
 
+        # Bu sürücüye ait, henüz bitmemiş işleri (bekleyen/kabul edilmiş) gönder
+        async with DB_POOL.acquire() as conn:
+            bekleyen_isler = await conn.fetch(
+                "SELECT id, nereden, nereye, fiyat, numara, durum FROM jobs "
+                "WHERE driver_username=$1 AND durum IN ('bekliyor', 'kabul_edildi') "
+                "ORDER BY created_at ASC",
+                surucu_id,
+            )
+        for is_ in bekleyen_isler:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "is_tipi": "YENI_CAGRI",
+                        "id": is_["id"],
+                        "nereden": is_["nereden"],
+                        "nereye": is_["nereye"],
+                        "fiyat": is_["fiyat"],
+                        "numara": is_["numara"],
+                        "kabul_edildi": is_["durum"] == "kabul_edildi",
+                    }
+                )
+            )
+            if is_["durum"] == "kabul_edildi":
+                DRIVERS[surucu_id]["status"] = "Mesgul"
+
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
@@ -163,6 +202,36 @@ async def surucu_websocket(websocket: WebSocket):
                 mesaj = payload.get("mesaj", "")
                 isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
                 await adminlere_yayinla(f"[{isim}] {mesaj}")
+                continue
+
+            if payload.get("tip") == "is_durum":
+                is_id = payload.get("id")
+                yeni_durum = payload.get("durum")
+                isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
+
+                async with DB_POOL.acquire() as conn:
+                    is_kaydi = await conn.fetchrow(
+                        "SELECT nereden, nereye FROM jobs WHERE id=$1 AND driver_username=$2",
+                        is_id, surucu_id,
+                    )
+                    if not is_kaydi:
+                        continue
+
+                    if yeni_durum == "kabul_edildi":
+                        await conn.execute(
+                            "UPDATE jobs SET durum='kabul_edildi' WHERE id=$1", is_id
+                        )
+                        await adminlere_yayinla(
+                            f"[{isim}] ALDI: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
+                        )
+                    elif yeni_durum == "iptal":
+                        await conn.execute("DELETE FROM jobs WHERE id=$1", is_id)
+                        await adminlere_yayinla(
+                            f"[{isim}] İPTAL ETTİ: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
+                        )
+                    elif yeni_durum == "tamamlandi":
+                        await conn.execute("DELETE FROM jobs WHERE id=$1", is_id)
+                        await adminlere_yayinla(f"[{isim}] {is_kaydi['nereden']} boş")
                 continue
 
             if surucu_id in DRIVERS:
@@ -217,12 +286,21 @@ async def admin_websocket(websocket: WebSocket):
                 )
                 continue
 
+            async with DB_POOL.acquire() as conn:
+                yeni_id = await conn.fetchval(
+                    "INSERT INTO jobs (driver_username, nereden, nereye, fiyat, numara, durum) "
+                    "VALUES ($1, $2, $3, $4, $5, 'bekliyor') RETURNING id",
+                    hedef_surucu, nereden, nereye, fiyat, numara,
+                )
+
             is_emri = {
                 "is_tipi": "YENI_CAGRI",
+                "id": yeni_id,
                 "nereden": nereden,
                 "nereye": nereye,
                 "fiyat": fiyat,
                 "numara": numara,
+                "kabul_edildi": False,
             }
             await info["websocket"].send_text(json.dumps(is_emri))
             await websocket.send_text(
