@@ -347,7 +347,7 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                         if (s.lat === 0) continue;
                         var popupHtml = '<b>' + (s.isim || id) + '</b><br>' +
                             'Durum: ' + s.status + '<br>' +
-                            '<button onclick="isVer(\'' + id + '\')">İş Ver</button>';
+                            '<button onclick="isVer(&quot;' + id + '&quot;)">İş Ver</button>';
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
                             surucuMarkerlari[id].setPopupContent(popupHtml);
