@@ -102,6 +102,9 @@ async def startup():
             """
         )
         await conn.execute(
+            "ALTER TABLE drivers ADD COLUMN IF NOT EXISTS sifre_metin TEXT"
+        )
+        await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id SERIAL PRIMARY KEY,
@@ -325,10 +328,11 @@ async def surucu_ekle(surucu: YeniSurucu, yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
         try:
             await conn.execute(
-                "INSERT INTO drivers (username, password_hash, display_name) VALUES ($1, $2, $3)",
+                "INSERT INTO drivers (username, password_hash, display_name, sifre_metin) VALUES ($1, $2, $3, $4)",
                 surucu.kullanici_adi,
                 sifre_hashle(surucu.sifre),
                 surucu.isim,
+                surucu.sifre,
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Bu kullanıcı adı zaten kayıtlı")
@@ -339,13 +343,14 @@ async def surucu_ekle(surucu: YeniSurucu, yetki: bool = Depends(admin_auth)):
 async def surucu_listele(yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
         kayitlar = await conn.fetch(
-            "SELECT id, username, display_name, created_at FROM drivers ORDER BY id DESC"
+            "SELECT id, username, display_name, sifre_metin, created_at FROM drivers ORDER BY id DESC"
         )
     return [
         {
             "id": k["id"],
             "kullanici_adi": k["username"],
             "isim": k["display_name"],
+            "sifre": k["sifre_metin"] or "—",
             "olusturma": k["created_at"].isoformat(),
         }
         for k in kayitlar
@@ -431,59 +436,79 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             }
             #altBolum {
                 padding: 16px 20px 32px;
+                display: flex;
+                gap: 16px;
+                align-items: flex-start;
             }
             #panel {
                 background: #1e293b;
                 border-radius: 12px;
-                padding: 20px;
+                padding: 18px;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-                margin-bottom: 16px;
+                width: 220px;
+                height: 220px;
+                flex-shrink: 0;
+                display: flex;
+                flex-direction: column;
             }
-            #panel h4 { margin: 0 0 12px; color: #f1f5f9; }
-            #panel .satir { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+            #panel h4 { margin: 0 0 12px; color: #f1f5f9; font-size: 14px; }
+            #panel .satir { display: flex; flex-direction: column; gap: 8px; flex: 1; }
             #panel input {
-                padding: 10px 12px;
+                padding: 8px 10px;
                 border-radius: 8px;
                 border: 1px solid #334155;
                 background: #0f172a;
                 color: #e2e8f0;
-                flex: 1;
-                min-width: 160px;
+                font-size: 13px;
+                width: 100%;
             }
             #panel button, #isFormuKutu button {
-                padding: 10px 18px;
+                padding: 9px 14px;
                 border-radius: 8px;
                 border: none;
                 background: #22c55e;
                 color: white;
                 font-weight: 600;
                 cursor: pointer;
+                font-size: 13px;
             }
-            #ekleSonuc { font-size: 13px; color: #94a3b8; }
-            #surucuListesi {
+            #ekleSonuc { font-size: 12px; color: #94a3b8; margin-top: 4px; }
+            #surucuKartlariSarmalayici {
+                flex: 1;
+                overflow-x: auto;
+                overflow-y: hidden;
+                padding-bottom: 8px;
+            }
+            #surucuKartlari {
+                display: flex;
+                gap: 12px;
+                height: 220px;
+            }
+            .surucuKart {
                 background: #1e293b;
                 border-radius: 12px;
-                padding: 20px;
+                padding: 16px;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                width: 190px;
+                height: 220px;
+                flex-shrink: 0;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
             }
-            #surucuListesi h4 { margin: 0 0 12px; color: #f1f5f9; }
-            #surucuListesi table { border-collapse: collapse; width: 100%; }
-            #surucuListesi td, #surucuListesi th {
-                border-bottom: 1px solid #334155;
-                padding: 10px 8px;
-                text-align: left;
-                font-size: 14px;
-                color: #cbd5e1;
-            }
-            #surucuListesi th { color: #64748b; font-weight: 600; text-transform: uppercase; font-size: 12px; }
-            #surucuListesi button {
-                padding: 6px 12px;
-                border-radius: 6px;
+            .surucuKart .isim { font-weight: 700; color: #f1f5f9; font-size: 15px; margin-bottom: 8px; word-break: break-word; }
+            .surucuKart .satirEtiket { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 8px; }
+            .surucuKart .satirDeger { font-size: 13.5px; color: #cbd5e1; word-break: break-word; }
+            .surucuKart button {
+                margin-top: 10px;
+                padding: 7px 10px;
+                border-radius: 8px;
                 border: none;
                 background: #dc2626;
                 color: white;
                 cursor: pointer;
                 font-size: 12px;
+                font-weight: 600;
             }
             #isFormuOrtusu {
                 display: none;
@@ -544,15 +569,14 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 <h4>Yeni Sürücü Ekle</h4>
                 <div class="satir">
                     <input id="yeniKullaniciAdi" placeholder="Kullanıcı adı" />
-                    <input id="yeniSifre" placeholder="Şifre" type="password" />
+                    <input id="yeniSifre" placeholder="Şifre" />
                     <input id="yeniIsim" placeholder="Görünen isim / tabela" />
                     <button onclick="surucuEkle()">Ekle</button>
                 </div>
-                <div id="ekleSonuc" style="margin-top:8px;"></div>
+                <div id="ekleSonuc"></div>
             </div>
-            <div id="surucuListesi">
-                <h4>Kayıtlı Sürücüler</h4>
-                <table id="tabloSurucular"><thead><tr><th>Kullanıcı Adı</th><th>İsim</th><th></th></tr></thead><tbody></tbody></table>
+            <div id="surucuKartlariSarmalayici">
+                <div id="surucuKartlari"></div>
             </div>
         </div>
 
@@ -663,13 +687,25 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
 
             function surucuListesiniYukle() {
                 fetch('/admin/api/drivers').then(res => res.json()).then(liste => {
-                    var tbody = document.querySelector('#tabloSurucular tbody');
-                    tbody.innerHTML = '';
+                    var kapsayici = document.getElementById('surucuKartlari');
+                    kapsayici.innerHTML = '';
+                    if (liste.length === 0) {
+                        kapsayici.innerHTML = '<div style="color:#64748b; font-size:13px; padding-top: 90px;">Henüz kayıtlı sürücü yok.</div>';
+                        return;
+                    }
                     liste.forEach(function(s) {
-                        var tr = document.createElement('tr');
-                        tr.innerHTML = '<td>' + s.kullanici_adi + '</td><td>' + s.isim + '</td>' +
-                            '<td><button onclick="surucuSil(' + s.id + ')">Sil</button></td>';
-                        tbody.appendChild(tr);
+                        var kart = document.createElement('div');
+                        kart.className = 'surucuKart';
+                        kart.innerHTML =
+                            '<div>' +
+                            '<div class="isim">' + s.isim + '</div>' +
+                            '<div class="satirEtiket">Kullanıcı Adı</div>' +
+                            '<div class="satirDeger">' + s.kullanici_adi + '</div>' +
+                            '<div class="satirEtiket">Şifre</div>' +
+                            '<div class="satirDeger">' + s.sifre + '</div>' +
+                            '</div>' +
+                            '<button onclick="surucuSil(' + s.id + ')">Sil</button>';
+                        kapsayici.appendChild(kart);
                     });
                 });
             }
