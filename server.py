@@ -300,36 +300,148 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <style>
-            body { font-family: sans-serif; margin: 0; }
-            #map { height: 65vh; width: 100%; }
-            #log { height: 10vh; background: #222; color: #0f0; padding: 10px; overflow-y: scroll; font-family: monospace; }
-            #panel { padding: 12px; background: #f4f4f4; }
-            #panel input { padding: 6px; margin-right: 6px; }
-            #panel button { padding: 6px 12px; }
-            #surucuListesi { padding: 0 12px 12px; }
+            * { box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                margin: 0;
+                background: #0f172a;
+                color: #e2e8f0;
+            }
+            #ustBaslik {
+                padding: 16px 20px;
+                background: #1e293b;
+                border-bottom: 1px solid #334155;
+            }
+            #ustBaslik h3 { margin: 0; font-weight: 600; color: #f1f5f9; }
+            #ustBaslik p { margin: 4px 0 0; font-size: 13px; color: #94a3b8; }
+            #anaBolum {
+                display: flex;
+                height: 68vh;
+                gap: 12px;
+                padding: 12px;
+            }
+            #map {
+                flex: 1;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            }
+            #logPanel {
+                flex: 1;
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 16px;
+                overflow-y: auto;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            #logPanel h4 { margin: 0 0 4px; color: #f1f5f9; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; }
+            .logSatiri {
+                background: #0f172a;
+                border-left: 3px solid #22c55e;
+                padding: 10px 12px;
+                border-radius: 6px;
+                font-size: 13.5px;
+                color: #cbd5e1;
+                animation: girisAnim 0.25s ease-out;
+            }
+            @keyframes girisAnim {
+                from { opacity: 0; transform: translateY(-6px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            #altBolum {
+                padding: 16px 20px 32px;
+            }
+            #panel {
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                margin-bottom: 16px;
+            }
+            #panel h4 { margin: 0 0 12px; color: #f1f5f9; }
+            #panel .satir { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+            #panel input {
+                padding: 10px 12px;
+                border-radius: 8px;
+                border: 1px solid #334155;
+                background: #0f172a;
+                color: #e2e8f0;
+                flex: 1;
+                min-width: 160px;
+            }
+            #panel button, #isFormuKutu button {
+                padding: 10px 18px;
+                border-radius: 8px;
+                border: none;
+                background: #22c55e;
+                color: white;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            #ekleSonuc { font-size: 13px; color: #94a3b8; }
+            #surucuListesi {
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            }
+            #surucuListesi h4 { margin: 0 0 12px; color: #f1f5f9; }
             #surucuListesi table { border-collapse: collapse; width: 100%; }
-            #surucuListesi td, #surucuListesi th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 14px; }
+            #surucuListesi td, #surucuListesi th {
+                border-bottom: 1px solid #334155;
+                padding: 10px 8px;
+                text-align: left;
+                font-size: 14px;
+                color: #cbd5e1;
+            }
+            #surucuListesi th { color: #64748b; font-weight: 600; text-transform: uppercase; font-size: 12px; }
+            #surucuListesi button {
+                padding: 6px 12px;
+                border-radius: 6px;
+                border: none;
+                background: #dc2626;
+                color: white;
+                cursor: pointer;
+                font-size: 12px;
+            }
             #isFormuOrtusu {
                 display: none;
                 position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                background: rgba(0,0,0,0.5);
+                background: rgba(0,0,0,0.6);
                 align-items: center; justify-content: center;
                 z-index: 1000;
             }
             #isFormuKutu {
-                background: white; padding: 20px; border-radius: 8px;
+                background: #1e293b; padding: 24px; border-radius: 12px;
                 width: 320px; max-width: 90%;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.5);
             }
-            #isFormuKutu h4 { margin-top: 0; }
-            #isFormuKutu label { display: block; margin-top: 10px; font-size: 13px; font-weight: bold; }
-            #isFormuKutu input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
-            #isFormuKutu .butonlar { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+            #isFormuKutu h4 { margin-top: 0; color: #f1f5f9; }
+            #isFormuKutu label { display: block; margin-top: 12px; font-size: 13px; font-weight: 600; color: #94a3b8; }
+            #isFormuKutu input {
+                width: 100%; padding: 10px; margin-top: 4px; box-sizing: border-box;
+                border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0;
+            }
+            #isFormuKutu .butonlar { margin-top: 18px; display: flex; gap: 8px; justify-content: flex-end; }
+            #isFormuKutu .butonlar button:first-child { background: #475569; }
         </style>
     </head>
     <body>
-        <h3 style="margin:8px;">Canlı Takip Paneli (İş Vermek İçin Bir Sürücüye Tıklayın)</h3>
-        <div id="map"></div>
-        <div id="log">Sistem hazır. Şoförlerin bağlanması bekleniyor...</div>
+        <div id="ustBaslik">
+            <h3>Canlı Takip Paneli</h3>
+            <p>İş vermek için haritadaki bir sürücüye tıkla</p>
+        </div>
+
+        <div id="anaBolum">
+            <div id="map"></div>
+            <div id="logPanel">
+                <h4>Canlı Akış</h4>
+                <div id="logIcerik"></div>
+            </div>
+        </div>
 
         <div id="isFormuOrtusu">
             <div id="isFormuKutu">
@@ -349,42 +461,60 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             </div>
         </div>
 
-        <div id="panel">
-            <b>Yeni Sürücü Ekle:</b><br><br>
-            <input id="yeniKullaniciAdi" placeholder="Kullanıcı adı" />
-            <input id="yeniSifre" placeholder="Şifre" type="password" />
-            <input id="yeniIsim" placeholder="Görünen isim / tabela" />
-            <button onclick="surucuEkle()">Ekle</button>
-            <span id="ekleSonuc"></span>
-        </div>
-        <div id="surucuListesi">
-            <b>Kayıtlı Sürücüler:</b>
-            <table id="tabloSurucular"><thead><tr><th>Kullanıcı Adı</th><th>İsim</th><th></th></tr></thead><tbody></tbody></table>
+        <div id="altBolum">
+            <div id="panel">
+                <h4>Yeni Sürücü Ekle</h4>
+                <div class="satir">
+                    <input id="yeniKullaniciAdi" placeholder="Kullanıcı adı" />
+                    <input id="yeniSifre" placeholder="Şifre" type="password" />
+                    <input id="yeniIsim" placeholder="Görünen isim / tabela" />
+                    <button onclick="surucuEkle()">Ekle</button>
+                </div>
+                <div id="ekleSonuc" style="margin-top:8px;"></div>
+            </div>
+            <div id="surucuListesi">
+                <h4>Kayıtlı Sürücüler</h4>
+                <table id="tabloSurucular"><thead><tr><th>Kullanıcı Adı</th><th>İsim</th><th></th></tr></thead><tbody></tbody></table>
+            </div>
         </div>
 
         <script>
-            var map = L.map('map').setView([41.0082, 28.9784], 11);
+            var map = L.map('map', {zoomControl: true}).setView([41.0082, 28.9784], 11);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
             var surucuMarkerlari = {};
             var secilenSurucuId = null;
-            var logDiv = document.getElementById('log');
+            var logIcerik = document.getElementById('logIcerik');
             var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
 
-            var maviIkon = L.icon({
-                iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-blue.png',
-                shadowUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-shadow.png',
-                iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41]
-            });
-            var kirmiziIkon = L.icon({
-                iconUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-icon-red.png',
-                shadowUrl: 'https://cdn.jsdelivr.net/gh/pointhi/leaflet-color-markers@master/img/marker-shadow.png',
-                iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41]
-            });
+            function arabaIkonu(renk) {
+                var svg = '<svg width="34" height="34" viewBox="0 0 24 24" style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));">' +
+                    '<path fill="' + renk + '" d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/>' +
+                    '</svg>';
+                return L.divIcon({
+                    html: svg,
+                    className: '',
+                    iconSize: [34, 34],
+                    iconAnchor: [17, 17],
+                    popupAnchor: [0, -17]
+                });
+            }
+            var maviIkon = arabaIkonu('#3b82f6');
+            var kirmiziIkon = arabaIkonu('#ef4444');
+
+            function logaYaz(mesaj) {
+                var satir = document.createElement('div');
+                satir.className = 'logSatiri';
+                var simdi = new Date().toLocaleTimeString('tr-TR');
+                satir.innerHTML = '<b>' + simdi + '</b> — ' + mesaj;
+                logIcerik.insertBefore(satir, logIcerik.firstChild);
+            }
 
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
-                if(data.bilgi) { logDiv.innerHTML += "<br>> " + data.bilgi; logDiv.scrollTop = logDiv.scrollHeight; }
+                if (data.bilgi) { logaYaz(data.bilgi); }
             };
+
+            logaYaz('Sistem hazır. Şoförlerin bağlanması bekleniyor...');
 
             function isVerFormAc(surucuId, surucuIsim) {
                 secilenSurucuId = surucuId;
