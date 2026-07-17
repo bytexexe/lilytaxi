@@ -456,7 +456,25 @@ async def surucu_sil(driver_id: int, yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
         kayit = await conn.fetchrow("SELECT username FROM drivers WHERE id=$1", driver_id)
         if kayit:
-            await conn.execute("DELETE FROM jobs WHERE driver_username=$1", kayit["username"])
+            username = kayit["username"]
+            await conn.execute("DELETE FROM jobs WHERE driver_username=$1", username)
+
+            aktif = DRIVERS.get(username)
+            if aktif and aktif.get("websocket"):
+                try:
+                    await aktif["websocket"].send_text(
+                        json.dumps(
+                            {
+                                "tip": "hesap_silindi",
+                                "mesaj": "Kaydınızın süresi dolmuştur.",
+                            }
+                        )
+                    )
+                    await aktif["websocket"].close()
+                except Exception:
+                    pass
+                DRIVERS.pop(username, None)
+
         await conn.execute("DELETE FROM drivers WHERE id=$1", driver_id)
     return {"basarili": True}
 
