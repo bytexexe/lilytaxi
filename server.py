@@ -4,6 +4,7 @@ import json
 import math
 import os
 import secrets
+from datetime import datetime
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -218,109 +219,122 @@ async def surucu_websocket(websocket: WebSocket):
 
         while True:
             data = await websocket.receive_text()
-            payload = json.loads(data)
+            try:
+                payload = json.loads(data)
 
-            if payload.get("tip") == "bildirim":
-                mesaj = payload.get("mesaj", "")
-                isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
-                await adminlere_yayinla(f"[{isim}] {mesaj}")
-                continue
+                if payload.get("tip") == "bildirim":
+                    mesaj = payload.get("mesaj", "")
+                    isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
+                    await adminlere_yayinla(f"[{isim}] {mesaj}")
+                    continue
 
-            if payload.get("tip") == "is_durum":
-                is_id = payload.get("id")
-                yeni_durum = payload.get("durum")
-                isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
+                if payload.get("tip") == "is_durum":
+                    is_id = payload.get("id")
+                    yeni_durum = payload.get("durum")
+                    isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
 
-                async with DB_POOL.acquire() as conn:
-                    is_kaydi = await conn.fetchrow(
-                        "SELECT nereden, nereye FROM jobs WHERE id=$1 AND driver_username=$2",
-                        is_id, surucu_id,
-                    )
-                    if not is_kaydi:
+                    async with DB_POOL.acquire() as conn:
+                        is_kaydi = await conn.fetchrow(
+                            "SELECT nereden, nereye FROM jobs WHERE id=$1 AND driver_username=$2",
+                            is_id, surucu_id,
+                        )
+                        if not is_kaydi:
+                            continue
+
+                        if yeni_durum == "kabul_edildi":
+                            await conn.execute(
+                                "UPDATE jobs SET durum='kabul_edildi' WHERE id=$1", is_id
+                            )
+                            await adminlere_yayinla(
+                                f"[{isim}] ALDI: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
+                            )
+                        elif yeni_durum == "iptal":
+                            await conn.execute(
+                                "UPDATE jobs SET durum='iptal' WHERE id=$1", is_id
+                            )
+                            await adminlere_yayinla(
+                                f"[{isim}] İPTAL ETTİ: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
+                            )
+                        elif yeni_durum == "tamamlandi":
+                            await conn.execute(
+                                "UPDATE jobs SET durum='tamamlandi', tamamlanma_zamani=now() WHERE id=$1",
+                                is_id,
+                            )
+                            await adminlere_yayinla(f"[{isim}] {is_kaydi['nereden']} boş")
+                    continue
+
+                if payload.get("tip") == "gecmis_getir":
+                    gun_str = payload.get("gun", "")
+                    try:
+                        gun_tarih = datetime.strptime(gun_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        await websocket.send_text(
+                            json.dumps({"tip": "gecmis_sonuc", "gun": gun_str, "yolculuklar": []})
+                        )
                         continue
+                    async with DB_POOL.acquire() as conn:
+                        kayitlar = await conn.fetch(
+                            "SELECT nereden, nereye, fiyat, tamamlanma_zamani FROM jobs "
+                            "WHERE driver_username=$1 AND durum='tamamlandi' "
+                            "AND tamamlanma_zamani::date = $2 "
+                            "ORDER BY tamamlanma_zamani DESC",
+                            surucu_id, gun_tarih,
+                        )
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "tip": "gecmis_sonuc",
+                                "gun": gun_str,
+                                "yolculuklar": [
+                                    {
+                                        "nereden": k["nereden"],
+                                        "nereye": k["nereye"],
+                                        "fiyat": k["fiyat"],
+                                        "saat": k["tamamlanma_zamani"].strftime("%H:%M"),
+                                    }
+                                    for k in kayitlar
+                                ],
+                            }
+                        )
+                    )
+                    continue
 
-                    if yeni_durum == "kabul_edildi":
-                        await conn.execute(
-                            "UPDATE jobs SET durum='kabul_edildi' WHERE id=$1", is_id
+                if payload.get("tip") == "kazanc_getir":
+                    async with DB_POOL.acquire() as conn:
+                        kayitlar = await conn.fetch(
+                            "SELECT tamamlanma_zamani::date AS gun, "
+                            "SUM(NULLIF(regexp_replace(fiyat, '[^0-9]', '', 'g'), '')::numeric) AS toplam, "
+                            "COUNT(*) AS adet "
+                            "FROM jobs WHERE driver_username=$1 AND durum='tamamlandi' "
+                            "GROUP BY gun ORDER BY gun DESC LIMIT 60",
+                            surucu_id,
                         )
-                        await adminlere_yayinla(
-                            f"[{isim}] ALDI: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "tip": "kazanc_sonuc",
+                                "gunler": [
+                                    {
+                                        "gun": k["gun"].isoformat(),
+                                        "toplam": float(k["toplam"] or 0),
+                                        "adet": k["adet"],
+                                    }
+                                    for k in kayitlar
+                                ],
+                            }
                         )
-                    elif yeni_durum == "iptal":
-                        await conn.execute(
-                            "UPDATE jobs SET durum='iptal' WHERE id=$1", is_id
-                        )
-                        await adminlere_yayinla(
-                            f"[{isim}] İPTAL ETTİ: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
-                        )
-                    elif yeni_durum == "tamamlandi":
-                        await conn.execute(
-                            "UPDATE jobs SET durum='tamamlandi', tamamlanma_zamani=now() WHERE id=$1",
-                            is_id,
-                        )
-                        await adminlere_yayinla(f"[{isim}] {is_kaydi['nereden']} boş")
+                    )
+                    continue
+
+                if surucu_id in DRIVERS:
+                    DRIVERS[surucu_id]["lat"] = payload.get("lat", 0.0)
+                    DRIVERS[surucu_id]["lng"] = payload.get("lng", 0.0)
+                    DRIVERS[surucu_id]["status"] = payload.get("status", "Musait")
+            except (WebSocketDisconnect, ConnectionResetError):
+                raise
+            except Exception as e:
+                print(f" Mesaj işlenirken hata (sürücü {surucu_id}): {e}")
                 continue
-
-            if payload.get("tip") == "gecmis_getir":
-                gun = payload.get("gun", "")
-                async with DB_POOL.acquire() as conn:
-                    kayitlar = await conn.fetch(
-                        "SELECT nereden, nereye, fiyat, tamamlanma_zamani FROM jobs "
-                        "WHERE driver_username=$1 AND durum='tamamlandi' "
-                        "AND tamamlanma_zamani::date = $2::date "
-                        "ORDER BY tamamlanma_zamani DESC",
-                        surucu_id, gun,
-                    )
-                await websocket.send_text(
-                    json.dumps(
-                        {
-                            "tip": "gecmis_sonuc",
-                            "gun": gun,
-                            "yolculuklar": [
-                                {
-                                    "nereden": k["nereden"],
-                                    "nereye": k["nereye"],
-                                    "fiyat": k["fiyat"],
-                                    "saat": k["tamamlanma_zamani"].strftime("%H:%M"),
-                                }
-                                for k in kayitlar
-                            ],
-                        }
-                    )
-                )
-                continue
-
-            if payload.get("tip") == "kazanc_getir":
-                async with DB_POOL.acquire() as conn:
-                    kayitlar = await conn.fetch(
-                        "SELECT tamamlanma_zamani::date AS gun, "
-                        "SUM(NULLIF(regexp_replace(fiyat, '[^0-9]', '', 'g'), '')::numeric) AS toplam, "
-                        "COUNT(*) AS adet "
-                        "FROM jobs WHERE driver_username=$1 AND durum='tamamlandi' "
-                        "GROUP BY gun ORDER BY gun DESC LIMIT 60",
-                        surucu_id,
-                    )
-                await websocket.send_text(
-                    json.dumps(
-                        {
-                            "tip": "kazanc_sonuc",
-                            "gunler": [
-                                {
-                                    "gun": k["gun"].isoformat(),
-                                    "toplam": float(k["toplam"] or 0),
-                                    "adet": k["adet"],
-                                }
-                                for k in kayitlar
-                            ],
-                        }
-                    )
-                )
-                continue
-
-            if surucu_id in DRIVERS:
-                DRIVERS[surucu_id]["lat"] = payload.get("lat", 0.0)
-                DRIVERS[surucu_id]["lng"] = payload.get("lng", 0.0)
-                DRIVERS[surucu_id]["status"] = payload.get("status", "Musait")
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -440,6 +454,9 @@ async def surucu_listele(yetki: bool = Depends(admin_auth)):
 @app.delete("/admin/api/drivers/{driver_id}")
 async def surucu_sil(driver_id: int, yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
+        kayit = await conn.fetchrow("SELECT username FROM drivers WHERE id=$1", driver_id)
+        if kayit:
+            await conn.execute("DELETE FROM jobs WHERE driver_username=$1", kayit["username"])
         await conn.execute("DELETE FROM drivers WHERE id=$1", driver_id)
     return {"basarili": True}
 
@@ -477,6 +494,12 @@ class SurumGuncelle(BaseModel):
 @app.post("/admin/api/surum")
 async def surum_guncelle(surum: SurumGuncelle, yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
+        mevcut = await conn.fetchrow("SELECT surum_kodu FROM app_version WHERE id=1")
+        if mevcut and surum.surum_kodu <= mevcut["surum_kodu"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Yeni sürüm kodu, mevcut olandan ({mevcut['surum_kodu']}) büyük olmalı.",
+            )
         await conn.execute(
             """
             UPDATE app_version
@@ -952,10 +975,15 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({surum_kodu: kod, surum_adi: ad, apk_url: link, notlar: notlar})
-                }).then(res => res.json()).then(function() {
-                    document.getElementById('surumSonuc').innerText = 'Güncellendi! Şoförler bir sonraki açılışta yeni sürümü görecek.';
-                    mevcutSurumuGoster();
-                });
+                }).then(res => res.json().then(data => ({status: res.status, data: data})))
+                  .then(({status, data}) => {
+                    if (status === 200) {
+                        document.getElementById('surumSonuc').innerText = 'Güncellendi! Şoförler bir sonraki açılışta yeni sürümü görecek.';
+                        mevcutSurumuGoster();
+                    } else {
+                        document.getElementById('surumSonuc').innerText = 'Hata: ' + (data.detail || 'bilinmeyen hata');
+                    }
+                  });
             }
 
             surucuListesiniYukle();
