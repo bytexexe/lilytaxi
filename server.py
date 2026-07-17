@@ -118,6 +118,9 @@ async def startup():
             )
             """
         )
+        await conn.execute(
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tamamlanma_zamani TIMESTAMP"
+        )
 
 
 @app.on_event("shutdown")
@@ -228,13 +231,74 @@ async def surucu_websocket(websocket: WebSocket):
                             f"[{isim}] ALDI: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
                         )
                     elif yeni_durum == "iptal":
-                        await conn.execute("DELETE FROM jobs WHERE id=$1", is_id)
+                        await conn.execute(
+                            "UPDATE jobs SET durum='iptal' WHERE id=$1", is_id
+                        )
                         await adminlere_yayinla(
                             f"[{isim}] İPTAL ETTİ: {is_kaydi['nereden']} → {is_kaydi['nereye']}"
                         )
                     elif yeni_durum == "tamamlandi":
-                        await conn.execute("DELETE FROM jobs WHERE id=$1", is_id)
+                        await conn.execute(
+                            "UPDATE jobs SET durum='tamamlandi', tamamlanma_zamani=now() WHERE id=$1",
+                            is_id,
+                        )
                         await adminlere_yayinla(f"[{isim}] {is_kaydi['nereden']} boş")
+                continue
+
+            if payload.get("tip") == "gecmis_getir":
+                gun = payload.get("gun", "")
+                async with DB_POOL.acquire() as conn:
+                    kayitlar = await conn.fetch(
+                        "SELECT nereden, nereye, fiyat, tamamlanma_zamani FROM jobs "
+                        "WHERE driver_username=$1 AND durum='tamamlandi' "
+                        "AND tamamlanma_zamani::date = $2::date "
+                        "ORDER BY tamamlanma_zamani DESC",
+                        surucu_id, gun,
+                    )
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "tip": "gecmis_sonuc",
+                            "gun": gun,
+                            "yolculuklar": [
+                                {
+                                    "nereden": k["nereden"],
+                                    "nereye": k["nereye"],
+                                    "fiyat": k["fiyat"],
+                                    "saat": k["tamamlanma_zamani"].strftime("%H:%M"),
+                                }
+                                for k in kayitlar
+                            ],
+                        }
+                    )
+                )
+                continue
+
+            if payload.get("tip") == "kazanc_getir":
+                async with DB_POOL.acquire() as conn:
+                    kayitlar = await conn.fetch(
+                        "SELECT tamamlanma_zamani::date AS gun, "
+                        "SUM(NULLIF(regexp_replace(fiyat, '[^0-9]', '', 'g'), '')::numeric) AS toplam, "
+                        "COUNT(*) AS adet "
+                        "FROM jobs WHERE driver_username=$1 AND durum='tamamlandi' "
+                        "GROUP BY gun ORDER BY gun DESC LIMIT 60",
+                        surucu_id,
+                    )
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "tip": "kazanc_sonuc",
+                            "gunler": [
+                                {
+                                    "gun": k["gun"].isoformat(),
+                                    "toplam": float(k["toplam"] or 0),
+                                    "adet": k["adet"],
+                                }
+                                for k in kayitlar
+                            ],
+                        }
+                    )
+                )
                 continue
 
             if surucu_id in DRIVERS:
