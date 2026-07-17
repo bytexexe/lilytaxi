@@ -121,6 +121,22 @@ async def startup():
         await conn.execute(
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS tamamlanma_zamani TIMESTAMP"
         )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_version (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                surum_kodu INTEGER NOT NULL DEFAULT 1,
+                surum_adi TEXT NOT NULL DEFAULT '1.0.0',
+                apk_url TEXT NOT NULL DEFAULT '',
+                notlar TEXT NOT NULL DEFAULT '',
+                guncellendi TIMESTAMP DEFAULT now(),
+                CHECK (id = 1)
+            )
+            """
+        )
+        await conn.execute(
+            "INSERT INTO app_version (id) VALUES (1) ON CONFLICT (id) DO NOTHING"
+        )
 
 
 @app.on_event("shutdown")
@@ -437,6 +453,46 @@ async def aktif_suruculer(yetki: bool = Depends(admin_auth)):
 
 
 # --- HARİTALI WEB ARAYÜZÜ (şifre korumalı) ---
+@app.get("/api/surum")
+async def surum_getir():
+    async with DB_POOL.acquire() as conn:
+        kayit = await conn.fetchrow(
+            "SELECT surum_kodu, surum_adi, apk_url, notlar FROM app_version WHERE id=1"
+        )
+    return {
+        "surum_kodu": kayit["surum_kodu"],
+        "surum_adi": kayit["surum_adi"],
+        "apk_url": kayit["apk_url"],
+        "notlar": kayit["notlar"],
+    }
+
+
+class SurumGuncelle(BaseModel):
+    surum_kodu: int
+    surum_adi: str
+    apk_url: str
+    notlar: str = ""
+
+
+@app.post("/admin/api/surum")
+async def surum_guncelle(surum: SurumGuncelle, yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE app_version
+            SET surum_kodu=$1, surum_adi=$2, apk_url=$3, notlar=$4, guncellendi=now()
+            WHERE id=1
+            """,
+            surum.surum_kodu, surum.surum_adi, surum.apk_url, surum.notlar,
+        )
+    return {"basarili": True}
+
+
+@app.get("/admin/api/surum")
+async def surum_getir_admin(yetki: bool = Depends(admin_auth)):
+    return await surum_getir()
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def get_admin_panel(yetki: bool = Depends(admin_auth)):
     return """
@@ -586,6 +642,35 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 font-weight: 600;
                 flex-shrink: 0;
             }
+            #surumBolumu {
+                margin: 0 20px 32px;
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            }
+            #surumBolumu h4 { margin: 0 0 12px; color: #f1f5f9; font-size: 14px; }
+            #surumBolumu .satir { display: flex; gap: 10px; flex-wrap: wrap; }
+            #surumBolumu input {
+                padding: 10px 12px;
+                border-radius: 8px;
+                border: 1px solid #334155;
+                background: #0f172a;
+                color: #e2e8f0;
+                flex: 1;
+                min-width: 140px;
+                font-size: 13px;
+            }
+            #surumBolumu button {
+                padding: 10px 16px;
+                border-radius: 8px;
+                border: none;
+                background: #3b82f6;
+                color: white;
+                font-weight: 600;
+                cursor: pointer;
+            }
+            #surumSonuc { font-size: 12px; color: #94a3b8; margin-top: 8px; }
             #isFormuOrtusu {
                 display: none;
                 position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -656,6 +741,21 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 <input id="surucuArama" placeholder="Sürücü ara (isim veya kullanıcı adı)..." oninput="surucuListesiniFiltreleVeGoster()" />
                 <div id="surucuSatirlari"></div>
             </div>
+        </div>
+
+        <div id="surumBolumu">
+            <h4>Uygulama Sürümü (Şoför App)</h4>
+            <div class="satir">
+                <input id="surumKodu" placeholder="Sürüm kodu (örn. 2)" type="number" />
+                <input id="surumAdi" placeholder="Sürüm adı (örn. 1.0.1)" />
+                <input id="apkLinki" placeholder="APK indirme linki (GitHub Release linki)" style="flex: 2;" />
+            </div>
+            <div class="satir" style="margin-top:8px;">
+                <input id="surumNotlari" placeholder="Bu sürümde neler değişti? (isteğe bağlı)" style="flex: 1;" />
+                <button onclick="surumGuncelle()">Sürümü Güncelle</button>
+            </div>
+            <div id="surumSonuc"></div>
+            <div id="mevcutSurum" style="margin-top:10px; font-size:13px; color:#94a3b8;"></div>
         </div>
 
         <script>
@@ -828,7 +928,38 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
                 });
             }
 
+            function mevcutSurumuGoster() {
+                fetch('/admin/api/surum').then(res => res.json()).then(s => {
+                    document.getElementById('surumKodu').value = s.surum_kodu;
+                    document.getElementById('surumAdi').value = s.surum_adi;
+                    document.getElementById('apkLinki').value = s.apk_url;
+                    document.getElementById('surumNotlari').value = s.notlar;
+                    document.getElementById('mevcutSurum').innerText =
+                        'Şu an yayında: v' + s.surum_adi + ' (kod ' + s.surum_kodu + ')';
+                });
+            }
+
+            function surumGuncelle() {
+                var kod = parseInt(document.getElementById('surumKodu').value, 10);
+                var ad = document.getElementById('surumAdi').value.trim();
+                var link = document.getElementById('apkLinki').value.trim();
+                var notlar = document.getElementById('surumNotlari').value.trim();
+                if (!kod || !ad || !link) {
+                    document.getElementById('surumSonuc').innerText = 'Sürüm kodu, adı ve APK linki zorunlu.';
+                    return;
+                }
+                fetch('/admin/api/surum', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({surum_kodu: kod, surum_adi: ad, apk_url: link, notlar: notlar})
+                }).then(res => res.json()).then(function() {
+                    document.getElementById('surumSonuc').innerText = 'Güncellendi! Şoförler bir sonraki açılışta yeni sürümü görecek.';
+                    mevcutSurumuGoster();
+                });
+            }
+
             surucuListesiniYukle();
+            mevcutSurumuGoster();
         </script>
     </body>
     </html>
