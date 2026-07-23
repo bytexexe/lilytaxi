@@ -5,7 +5,7 @@ import math
 import os
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -101,6 +101,27 @@ async def adminlere_mesaj_silindi_yayinla(kullanici_adi: str, mesaj_id: int):
     for soket in kopmus_soketler:
         if soket in ADMIN_SOCKETS:
             ADMIN_SOCKETS.remove(soket)
+
+
+async def secili_suruculere_yayinla(kullanici_adlari: list, veri: dict):
+    metin = json.dumps(veri)
+    for kullanici_adi in kullanici_adlari:
+        info = DRIVERS.get(kullanici_adi)
+        if info and info.get("websocket"):
+            try:
+                await info["websocket"].send_text(metin)
+            except Exception:
+                pass
+
+
+async def tum_suruculere_yayinla(veri: dict):
+    metin = json.dumps(veri)
+    for info in list(DRIVERS.values()):
+        if info.get("websocket"):
+            try:
+                await info["websocket"].send_text(metin)
+            except Exception:
+                pass
 
 
 def admin_auth(credentials: HTTPBasicCredentials = Depends(security)):
@@ -211,6 +232,18 @@ async def startup():
         )
         await conn.execute(
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS okundu BOOLEAN NOT NULL DEFAULT false"
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_zones (
+                id SERIAL PRIMARY KEY,
+                lat DOUBLE PRECISION NOT NULL,
+                lng DOUBLE PRECISION NOT NULL,
+                not_metni TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT now(),
+                bitis_zamani TIMESTAMP
+            )
+            """
         )
         await conn.execute(
             "INSERT INTO app_version (id) VALUES (1) ON CONFLICT (id) DO NOTHING"
@@ -474,6 +507,31 @@ async def surucu_websocket(websocket: WebSocket):
                         )
                     if silindi:
                         await adminlere_mesaj_silindi_yayinla(surucu_id, silinecek_id)
+                    continue
+
+                if payload.get("tip") == "riskleri_getir":
+                    async with DB_POOL.acquire() as conn:
+                        kayitlar = await conn.fetch(
+                            "SELECT id, lat, lng, not_metni FROM risk_zones "
+                            "WHERE bitis_zamani IS NULL OR bitis_zamani > now() "
+                            "ORDER BY created_at DESC"
+                        )
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "tip": "riskler_sonuc",
+                                "riskler": [
+                                    {
+                                        "id": k["id"],
+                                        "lat": k["lat"],
+                                        "lng": k["lng"],
+                                        "not": k["not_metni"],
+                                    }
+                                    for k in kayitlar
+                                ],
+                            }
+                        )
+                    )
                     continue
 
                 if surucu_id in DRIVERS:
@@ -816,6 +874,71 @@ async def sohbeti_tamamen_sil(kullanici_adi: str, yetki: bool = Depends(admin_au
     return {"basarili": True}
 
 
+class YeniRisk(BaseModel):
+    lat: float
+    lng: float
+    not_metni: str
+    sure_saat: float | None = None  # None ise manuel silinene kadar kalır
+    bildirilecek_soforler: list[str] = []
+
+
+@app.post("/admin/api/riskler")
+async def risk_ekle(risk: YeniRisk, yetki: bool = Depends(admin_auth)):
+    bitis = None
+    if risk.sure_saat:
+        bitis = datetime.now() + timedelta(hours=risk.sure_saat)
+
+    async with DB_POOL.acquire() as conn:
+        yeni_id = await conn.fetchval(
+            "INSERT INTO risk_zones (lat, lng, not_metni, bitis_zamani) "
+            "VALUES ($1, $2, $3, $4) RETURNING id",
+            risk.lat, risk.lng, risk.not_metni, bitis,
+        )
+
+    if risk.bildirilecek_soforler:
+        await secili_suruculere_yayinla(
+            risk.bildirilecek_soforler,
+            {
+                "tip": "risk_bildirimi",
+                "id": yeni_id,
+                "lat": risk.lat,
+                "lng": risk.lng,
+                "not": risk.not_metni,
+            },
+        )
+
+    return {"basarili": True, "id": yeni_id}
+
+
+@app.get("/admin/api/riskler")
+async def riskleri_listele(yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        kayitlar = await conn.fetch(
+            "SELECT id, lat, lng, not_metni, created_at, bitis_zamani FROM risk_zones "
+            "WHERE bitis_zamani IS NULL OR bitis_zamani > now() "
+            "ORDER BY created_at DESC"
+        )
+    return [
+        {
+            "id": k["id"],
+            "lat": k["lat"],
+            "lng": k["lng"],
+            "not": k["not_metni"],
+            "olusturma": k["created_at"].isoformat(),
+            "bitis": k["bitis_zamani"].isoformat() if k["bitis_zamani"] else None,
+        }
+        for k in kayitlar
+    ]
+
+
+@app.delete("/admin/api/riskler/{risk_id}")
+async def risk_sil(risk_id: int, yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        await conn.execute("DELETE FROM risk_zones WHERE id=$1", risk_id)
+    await tum_suruculere_yayinla({"tip": "risk_silindi", "id": risk_id})
+    return {"basarili": True}
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def get_admin_panel(credentials: HTTPBasicCredentials = Depends(security)):
     if not (
@@ -864,6 +987,75 @@ _ADMIN_HTML = """
                 border-radius: 12px;
                 overflow: hidden;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                position: relative;
+            }
+            #riskModuBtn {
+                position: absolute;
+                bottom: 16px;
+                right: 16px;
+                z-index: 900;
+                width: 50px;
+                height: 50px;
+                border-radius: 50%;
+                border: none;
+                background: #1e293b;
+                font-size: 24px;
+                cursor: pointer;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            }
+            #riskModuBtn.aktif {
+                background: #dc2626;
+                box-shadow: 0 0 0 4px rgba(220,38,38,0.3);
+            }
+            #riskFormuOrtusu {
+                display: none;
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.6);
+                align-items: center; justify-content: center;
+                z-index: 1000;
+            }
+            #riskFormuKutu {
+                background: #1e293b; padding: 24px; border-radius: 12px;
+                width: 340px; max-width: 90%;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            }
+            #riskFormuKutu h4 { margin-top: 0; color: #f1f5f9; }
+            #riskFormuKutu label { display: block; margin-top: 12px; font-size: 13px; font-weight: 600; color: #94a3b8; }
+            #riskFormuKutu input, #riskFormuKutu select {
+                width: 100%; padding: 10px; margin-top: 4px; box-sizing: border-box;
+                border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0;
+            }
+            #riskSoforListesi {
+                max-height: 140px; overflow-y: auto; margin-top: 4px;
+                background: #0f172a; border-radius: 8px; padding: 8px;
+                border: 1px solid #334155;
+            }
+            #riskSoforListesi label {
+                display: flex; align-items: center; gap: 6px;
+                font-weight: 400; color: #e2e8f0; margin: 4px 0; font-size: 13px;
+            }
+            #riskFormuKutu .butonlar { margin-top: 18px; display: flex; gap: 8px; justify-content: flex-end; }
+            #riskFormuKutu .butonlar button {
+                padding: 9px 14px; border-radius: 8px; border: none;
+                background: #22c55e; color: white; font-weight: 600; cursor: pointer; font-size: 13px;
+            }
+            #riskFormuKutu .butonlar button:first-child { background: #475569; }
+            #riskYonetimBolumu {
+                margin: 0 20px 32px;
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            }
+            #riskYonetimBolumu h4 { margin: 0 0 12px; color: #f1f5f9; font-size: 14px; }
+            .riskSatir {
+                background: #0f172a; border-radius: 8px; padding: 10px 14px;
+                display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 8px; font-size: 13.5px; color: #e2e8f0;
+            }
+            .riskSatir button {
+                padding: 6px 12px; border-radius: 6px; border: none;
+                background: #dc2626; color: white; cursor: pointer; font-size: 12px;
             }
             #logPanel {
                 flex: 1;
@@ -1109,11 +1301,39 @@ _ADMIN_HTML = """
         </div>
 
         <div id="anaBolum">
-            <div id="map"></div>
+            <div id="map">
+                <button id="riskModuBtn" onclick="riskModunuAcKapat()" title="Riskli bölge ekle">🚓</button>
+            </div>
             <div id="logPanel">
                 <h4>Canlı Akış</h4>
                 <div id="logIcerik"></div>
             </div>
+        </div>
+
+        <div id="riskFormuOrtusu">
+            <div id="riskFormuKutu">
+                <h4>Riskli Bölge Ekle</h4>
+                <label>Not:</label>
+                <input id="riskNot" placeholder="örn. Radar var, kaza var..." />
+                <label>Süre:</label>
+                <select id="riskSure">
+                    <option value="">Manuel silinene kadar kalsın</option>
+                    <option value="1">1 saat</option>
+                    <option value="4">4 saat</option>
+                    <option value="24">24 saat</option>
+                </select>
+                <label>Bildirim gönderilecek sürücüler:</label>
+                <div id="riskSoforListesi"></div>
+                <div class="butonlar">
+                    <button onclick="riskFormuKapat()">İptal</button>
+                    <button onclick="riskEkle()">Ekle</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="riskYonetimBolumu">
+            <h4>Aktif Riskli Bölgeler</h4>
+            <div id="riskListesi"></div>
         </div>
 
         <div id="isFormuOrtusu">
@@ -1511,6 +1731,119 @@ _ADMIN_HTML = """
             }
 
             sohbetleriYukle();
+
+            // ---------------- Riskli Bölgeler ----------------
+            var riskModuAcik = false;
+            var riskMarkerlari = {};
+            var secilenRiskKonumu = null;
+            var polisIkonu = L.divIcon({
+                html: '<div style="font-size:26px;">🚓</div>',
+                className: '',
+                iconSize: [30, 30],
+                iconAnchor: [15, 15]
+            });
+
+            function riskModunuAcKapat() {
+                riskModuAcik = !riskModuAcik;
+                document.getElementById('riskModuBtn').classList.toggle('aktif', riskModuAcik);
+            }
+
+            map.on('click', function(e) {
+                if (!riskModuAcik) return;
+                secilenRiskKonumu = {lat: e.latlng.lat, lng: e.latlng.lng};
+                riskFormuAc();
+            });
+
+            function riskFormuAc() {
+                document.getElementById('riskNot').value = '';
+                document.getElementById('riskSure').value = '';
+                fetch('/admin/api/drivers').then(res => res.json()).then(liste => {
+                    var kutu = document.getElementById('riskSoforListesi');
+                    kutu.innerHTML = '';
+                    if (liste.length === 0) {
+                        kutu.innerHTML = '<div style="color:#64748b;">Kayıtlı sürücü yok.</div>';
+                    }
+                    liste.forEach(function(s) {
+                        var etiket = document.createElement('label');
+                        etiket.innerHTML = '<input type="checkbox" value="' + s.kullanici_adi + '"> ' + s.isim;
+                        kutu.appendChild(etiket);
+                    });
+                });
+                document.getElementById('riskFormuOrtusu').style.display = 'flex';
+            }
+
+            function riskFormuKapat() {
+                document.getElementById('riskFormuOrtusu').style.display = 'none';
+                riskModuAcik = false;
+                document.getElementById('riskModuBtn').classList.remove('aktif');
+            }
+
+            function riskEkle() {
+                if (!secilenRiskKonumu) return;
+                var not = document.getElementById('riskNot').value.trim();
+                if (!not) { alert('Lütfen bir not gir.'); return; }
+                var sureDegeri = document.getElementById('riskSure').value;
+                var secilenSoforler = Array.from(
+                    document.querySelectorAll('#riskSoforListesi input:checked')
+                ).map(function(el) { return el.value; });
+
+                fetch('/admin/api/riskler', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        lat: secilenRiskKonumu.lat,
+                        lng: secilenRiskKonumu.lng,
+                        not_metni: not,
+                        sure_saat: sureDegeri ? parseFloat(sureDegeri) : null,
+                        bildirilecek_soforler: secilenSoforler
+                    })
+                }).then(res => res.json()).then(function() {
+                    logaYaz('Riskli bölge eklendi: ' + not);
+                    riskleriYukle();
+                    riskFormuKapat();
+                });
+            }
+
+            function riskSil(riskId) {
+                if (!confirm('Bu riskli bölgeyi kaldırmak istediğine emin misin?')) return;
+                fetch('/admin/api/riskler/' + riskId, {method: 'DELETE'}).then(function() {
+                    riskleriYukle();
+                });
+            }
+
+            function riskleriYukle() {
+                fetch('/admin/api/riskler').then(res => res.json()).then(liste => {
+                    var mevcutIdler = liste.map(r => r.id);
+                    for (var id in riskMarkerlari) {
+                        if (mevcutIdler.indexOf(parseInt(id)) === -1) {
+                            map.removeLayer(riskMarkerlari[id]);
+                            delete riskMarkerlari[id];
+                        }
+                    }
+                    liste.forEach(function(r) {
+                        if (!riskMarkerlari[r.id]) {
+                            riskMarkerlari[r.id] = L.marker([r.lat, r.lng], {icon: polisIkonu})
+                                .addTo(map)
+                                .bindPopup('<b>Riskli Bölge</b><br>' + r.not);
+                        }
+                    });
+
+                    var kapsayici = document.getElementById('riskListesi');
+                    kapsayici.innerHTML = '';
+                    if (liste.length === 0) {
+                        kapsayici.innerHTML = '<div style="color:#64748b; font-size:13px;">Aktif riskli bölge yok.</div>';
+                        return;
+                    }
+                    liste.forEach(function(r) {
+                        var satir = document.createElement('div');
+                        satir.className = 'riskSatir';
+                        satir.innerHTML = '<span>' + r.not + '</span>' +
+                            '<button onclick="riskSil(' + r.id + ')">Kaldır</button>';
+                        kapsayici.appendChild(satir);
+                    });
+                });
+            }
+            riskleriYukle();
         </script>
     </body>
     </html>
