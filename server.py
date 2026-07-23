@@ -81,6 +81,19 @@ def ws_admin_auth(auth_header: str) -> bool:
         return False
 
 
+def ws_token_dogrula(token: str) -> bool:
+    if not token:
+        return False
+    try:
+        decoded = base64.b64decode(token).decode()
+        kullanici, _, sifre = decoded.partition(":")
+        return secrets.compare_digest(kullanici, ADMIN_USER) and secrets.compare_digest(
+            sifre, ADMIN_PASSWORD
+        )
+    except Exception:
+        return False
+
+
 @app.on_event("startup")
 async def startup():
     global DB_POOL
@@ -348,7 +361,10 @@ async def surucu_websocket(websocket: WebSocket):
 # --- YÖNETİCİ PANELİ WEBSOCKET (şifre korumalı) ---
 @app.websocket("/admin/ws")
 async def admin_websocket(websocket: WebSocket):
-    if not ws_admin_auth(websocket.headers.get("authorization")):
+    token = websocket.query_params.get("token", "")
+    if not ws_token_dogrula(token) and not ws_admin_auth(
+        websocket.headers.get("authorization")
+    ):
         await websocket.close(code=1008)
         return
 
@@ -535,8 +551,21 @@ async def surum_getir_admin(yetki: bool = Depends(admin_auth)):
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def get_admin_panel(yetki: bool = Depends(admin_auth)):
-    return """
+async def get_admin_panel(credentials: HTTPBasicCredentials = Depends(security)):
+    if not (
+        secrets.compare_digest(credentials.username, ADMIN_USER)
+        and secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+    ):
+        raise HTTPException(
+            status_code=401, detail="Yetkisiz", headers={"WWW-Authenticate": "Basic"}
+        )
+    token = base64.b64encode(
+        f"{credentials.username}:{credentials.password}".encode()
+    ).decode()
+    return _ADMIN_HTML.replace("__WS_TOKEN__", token)
+
+
+_ADMIN_HTML = """
     <!DOCTYPE html>
     <html>
     <head>
@@ -805,7 +834,7 @@ async def get_admin_panel(yetki: bool = Depends(admin_auth)):
             var surucuMarkerlari = {};
             var secilenSurucuId = null;
             var logIcerik = document.getElementById('logIcerik');
-            var ws = new WebSocket("wss://" + window.location.host + "/admin/ws");
+            var ws = new WebSocket("wss://" + window.location.host + "/admin/ws?token=__WS_TOKEN__");
 
             function arabaIkonu(renk) {
                 var svg = '<svg width="34" height="34" viewBox="0 0 24 24" style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));">' +
