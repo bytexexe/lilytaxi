@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 from datetime import datetime
 
@@ -30,6 +31,12 @@ security = HTTPBasic()
 
 def sifre_hashle(sifre: str) -> str:
     return hashlib.sha256((sifre + PASSWORD_SALT).encode()).hexdigest()
+
+
+def surum_tuple(surum_adi: str):
+    """'1.2.3' -> (1, 2, 3) şeklinde karşılaştırılabilir bir değere çevirir."""
+    parcalar = re.findall(r"\d+", surum_adi)
+    return tuple(int(p) for p in parcalar) if parcalar else (0,)
 
 
 def calculate_distance(lat1, lon1, lat2, lon2):
@@ -508,10 +515,9 @@ async def aktif_suruculer(yetki: bool = Depends(admin_auth)):
 async def surum_getir():
     async with DB_POOL.acquire() as conn:
         kayit = await conn.fetchrow(
-            "SELECT surum_kodu, surum_adi, apk_url, notlar FROM app_version WHERE id=1"
+            "SELECT surum_adi, apk_url, notlar FROM app_version WHERE id=1"
         )
     return {
-        "surum_kodu": kayit["surum_kodu"],
         "surum_adi": kayit["surum_adi"],
         "apk_url": kayit["apk_url"],
         "notlar": kayit["notlar"],
@@ -519,7 +525,6 @@ async def surum_getir():
 
 
 class SurumGuncelle(BaseModel):
-    surum_kodu: int
     surum_adi: str
     apk_url: str
     notlar: str = ""
@@ -528,19 +533,19 @@ class SurumGuncelle(BaseModel):
 @app.post("/admin/api/surum")
 async def surum_guncelle(surum: SurumGuncelle, yetki: bool = Depends(admin_auth)):
     async with DB_POOL.acquire() as conn:
-        mevcut = await conn.fetchrow("SELECT surum_kodu FROM app_version WHERE id=1")
-        if mevcut and surum.surum_kodu <= mevcut["surum_kodu"]:
+        mevcut = await conn.fetchrow("SELECT surum_adi FROM app_version WHERE id=1")
+        if mevcut and surum_tuple(surum.surum_adi) <= surum_tuple(mevcut["surum_adi"]):
             raise HTTPException(
                 status_code=400,
-                detail=f"Yeni sürüm kodu, mevcut olandan ({mevcut['surum_kodu']}) büyük olmalı.",
+                detail=f"Yeni sürüm ({surum.surum_adi}), mevcut olandan ({mevcut['surum_adi']}) büyük olmalı.",
             )
         await conn.execute(
             """
             UPDATE app_version
-            SET surum_kodu=$1, surum_adi=$2, apk_url=$3, notlar=$4, guncellendi=now()
+            SET surum_adi=$1, apk_url=$2, notlar=$3, guncellendi=now()
             WHERE id=1
             """,
-            surum.surum_kodu, surum.surum_adi, surum.apk_url, surum.notlar,
+            surum.surum_adi, surum.apk_url, surum.notlar,
         )
     return {"basarili": True}
 
@@ -816,9 +821,8 @@ _ADMIN_HTML = """
         <div id="surumBolumu">
             <h4>Uygulama Sürümü (Şoför App)</h4>
             <div class="satir">
-                <input id="surumKodu" placeholder="Sürüm kodu (örn. 2)" type="number" />
-                <input id="surumAdi" placeholder="Sürüm adı (örn. 1.0.1)" />
-                <input id="apkLinki" placeholder="APK indirme linki (GitHub Release linki)" style="flex: 2;" />
+                <input id="surumAdi" placeholder="Sürüm (örn. 1.0.1)" />
+                <input id="apkLinki" placeholder="APK indirme linki" style="flex: 2;" />
             </div>
             <div class="satir" style="margin-top:8px;">
                 <input id="surumNotlari" placeholder="Bu sürümde neler değişti? (isteğe bağlı)" style="flex: 1;" />
@@ -1000,28 +1004,26 @@ _ADMIN_HTML = """
 
             function mevcutSurumuGoster() {
                 fetch('/admin/api/surum').then(res => res.json()).then(s => {
-                    document.getElementById('surumKodu').value = s.surum_kodu;
                     document.getElementById('surumAdi').value = s.surum_adi;
                     document.getElementById('apkLinki').value = s.apk_url;
                     document.getElementById('surumNotlari').value = s.notlar;
                     document.getElementById('mevcutSurum').innerText =
-                        'Şu an yayında: v' + s.surum_adi + ' (kod ' + s.surum_kodu + ')';
+                        'Şu an yayında: v' + s.surum_adi;
                 });
             }
 
             function surumGuncelle() {
-                var kod = parseInt(document.getElementById('surumKodu').value, 10);
                 var ad = document.getElementById('surumAdi').value.trim();
                 var link = document.getElementById('apkLinki').value.trim();
                 var notlar = document.getElementById('surumNotlari').value.trim();
-                if (!kod || !ad || !link) {
-                    document.getElementById('surumSonuc').innerText = 'Sürüm kodu, adı ve APK linki zorunlu.';
+                if (!ad || !link) {
+                    document.getElementById('surumSonuc').innerText = 'Sürüm ve APK linki zorunlu.';
                     return;
                 }
                 fetch('/admin/api/surum', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({surum_kodu: kod, surum_adi: ad, apk_url: link, notlar: notlar})
+                    body: JSON.stringify({surum_adi: ad, apk_url: link, notlar: notlar})
                 }).then(res => res.json().then(data => ({status: res.status, data: data})))
                   .then(({status, data}) => {
                     if (status === 200) {
