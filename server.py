@@ -63,6 +63,27 @@ async def adminlere_yayinla(mesaj: str):
             ADMIN_SOCKETS.remove(soket)
 
 
+async def adminlere_sohbet_yayinla(kullanici_adi: str, isim: str, gonderen: str, mesaj: str):
+    veri = json.dumps(
+        {
+            "tip": "sohbet_bildirim",
+            "kullanici_adi": kullanici_adi,
+            "isim": isim,
+            "gonderen": gonderen,
+            "mesaj": mesaj,
+        }
+    )
+    kopmus_soketler = []
+    for soket in ADMIN_SOCKETS:
+        try:
+            await soket.send_text(veri)
+        except Exception:
+            kopmus_soketler.append(soket)
+    for soket in kopmus_soketler:
+        if soket in ADMIN_SOCKETS:
+            ADMIN_SOCKETS.remove(soket)
+
+
 def admin_auth(credentials: HTTPBasicCredentials = Depends(security)):
     dogru_kullanici = secrets.compare_digest(credentials.username, ADMIN_USER)
     dogru_sifre = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
@@ -152,6 +173,17 @@ async def startup():
                 notlar TEXT NOT NULL DEFAULT '',
                 guncellendi TIMESTAMP DEFAULT now(),
                 CHECK (id = 1)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                driver_username TEXT NOT NULL,
+                gonderen TEXT NOT NULL,
+                mesaj TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT now()
             )
             """
         )
@@ -346,6 +378,42 @@ async def surucu_websocket(websocket: WebSocket):
                     )
                     continue
 
+                if payload.get("tip") == "sohbet_mesaji":
+                    mesaj_metni = payload.get("mesaj", "").strip()
+                    if mesaj_metni:
+                        async with DB_POOL.acquire() as conn:
+                            await conn.execute(
+                                "INSERT INTO messages (driver_username, gonderen, mesaj) VALUES ($1, 'surucu', $2)",
+                                surucu_id, mesaj_metni,
+                            )
+                        isim = DRIVERS.get(surucu_id, {}).get("isim", surucu_id)
+                        await adminlere_sohbet_yayinla(surucu_id, isim, "surucu", mesaj_metni)
+                    continue
+
+                if payload.get("tip") == "sohbet_gecmisi_getir":
+                    async with DB_POOL.acquire() as conn:
+                        kayitlar = await conn.fetch(
+                            "SELECT gonderen, mesaj, created_at FROM messages "
+                            "WHERE driver_username=$1 ORDER BY created_at ASC",
+                            surucu_id,
+                        )
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "tip": "sohbet_gecmisi_sonuc",
+                                "mesajlar": [
+                                    {
+                                        "gonderen": k["gonderen"],
+                                        "mesaj": k["mesaj"],
+                                        "zaman": k["created_at"].strftime("%H:%M"),
+                                    }
+                                    for k in kayitlar
+                                ],
+                            }
+                        )
+                    )
+                    continue
+
                 if surucu_id in DRIVERS:
                     DRIVERS[surucu_id]["lat"] = payload.get("lat", 0.0)
                     DRIVERS[surucu_id]["lng"] = payload.get("lng", 0.0)
@@ -481,6 +549,7 @@ async def surucu_sil(driver_id: int, yetki: bool = Depends(admin_auth)):
         if kayit:
             username = kayit["username"]
             await conn.execute("DELETE FROM jobs WHERE driver_username=$1", username)
+            await conn.execute("DELETE FROM messages WHERE driver_username=$1", username)
 
             aktif = DRIVERS.get(username)
             if aktif and aktif.get("websocket"):
@@ -553,6 +622,82 @@ async def surum_guncelle(surum: SurumGuncelle, yetki: bool = Depends(admin_auth)
 @app.get("/admin/api/surum")
 async def surum_getir_admin(yetki: bool = Depends(admin_auth)):
     return await surum_getir()
+
+
+@app.get("/admin/api/sohbetler")
+async def sohbetleri_listele(yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        kayitlar = await conn.fetch(
+            """
+            SELECT m.driver_username,
+                   d.display_name,
+                   (SELECT mesaj FROM messages m2
+                    WHERE m2.driver_username = m.driver_username
+                    ORDER BY m2.created_at DESC LIMIT 1) AS son_mesaj,
+                   MAX(m.created_at) AS son_zaman
+            FROM messages m
+            LEFT JOIN drivers d ON d.username = m.driver_username
+            GROUP BY m.driver_username, d.display_name
+            ORDER BY son_zaman DESC
+            """
+        )
+    return [
+        {
+            "kullanici_adi": k["driver_username"],
+            "isim": k["display_name"] or k["driver_username"],
+            "son_mesaj": k["son_mesaj"],
+            "son_zaman": k["son_zaman"].isoformat() if k["son_zaman"] else None,
+        }
+        for k in kayitlar
+    ]
+
+
+@app.get("/admin/api/sohbet/{kullanici_adi}")
+async def sohbet_getir(kullanici_adi: str, yetki: bool = Depends(admin_auth)):
+    async with DB_POOL.acquire() as conn:
+        kayitlar = await conn.fetch(
+            "SELECT gonderen, mesaj, created_at FROM messages "
+            "WHERE driver_username=$1 ORDER BY created_at ASC",
+            kullanici_adi,
+        )
+    return [
+        {
+            "gonderen": k["gonderen"],
+            "mesaj": k["mesaj"],
+            "zaman": k["created_at"].strftime("%H:%M"),
+        }
+        for k in kayitlar
+    ]
+
+
+class YeniMesaj(BaseModel):
+    mesaj: str
+
+
+@app.post("/admin/api/sohbet/{kullanici_adi}")
+async def sohbet_gonder(
+    kullanici_adi: str, veri: YeniMesaj, yetki: bool = Depends(admin_auth)
+):
+    mesaj_metni = veri.mesaj.strip()
+    if not mesaj_metni:
+        raise HTTPException(status_code=400, detail="Mesaj boş olamaz")
+
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO messages (driver_username, gonderen, mesaj) VALUES ($1, 'admin', $2)",
+            kullanici_adi, mesaj_metni,
+        )
+
+    info = DRIVERS.get(kullanici_adi)
+    if info and info.get("websocket"):
+        try:
+            await info["websocket"].send_text(
+                json.dumps({"tip": "sohbet_gelen", "gonderen": "admin", "mesaj": mesaj_metni})
+            )
+        except Exception:
+            pass
+
+    return {"basarili": True}
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -746,6 +891,68 @@ _ADMIN_HTML = """
                 cursor: pointer;
             }
             #surumSonuc { font-size: 12px; color: #94a3b8; margin-top: 8px; }
+            #sohbetBolumu {
+                margin: 0 20px 32px;
+                display: flex;
+                gap: 16px;
+                height: 380px;
+            }
+            #sohbetListesiKutu {
+                width: 260px;
+                flex-shrink: 0;
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 16px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                display: flex;
+                flex-direction: column;
+            }
+            #sohbetListesiKutu h4 { margin: 0 0 10px; color: #f1f5f9; font-size: 14px; }
+            #sohbetListesi { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+            .sohbetSatir {
+                background: #0f172a;
+                border-radius: 8px;
+                padding: 10px;
+                cursor: pointer;
+                border: 1px solid transparent;
+            }
+            .sohbetSatir:hover { border-color: #3b82f6; }
+            .sohbetSatir.secili { border-color: #3b82f6; background: #1e3a5f; }
+            .sohbetSatir .isim { font-weight: 700; color: #f1f5f9; font-size: 13.5px; }
+            .sohbetSatir .onizleme { font-size: 12px; color: #94a3b8; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            #sohbetPenceresi {
+                flex: 1;
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 16px;
+                box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+                display: flex;
+                flex-direction: column;
+            }
+            #sohbetBaslik { font-weight: 700; color: #f1f5f9; margin-bottom: 10px; font-size: 14px; }
+            #sohbetMesajlari { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+            .mesajBalon { max-width: 70%; padding: 8px 12px; border-radius: 10px; font-size: 13.5px; }
+            .mesajSurucu { align-self: flex-start; background: #334155; color: #e2e8f0; }
+            .mesajAdmin { align-self: flex-end; background: #3b82f6; color: white; }
+            #sohbetGirisSatiri { display: flex; gap: 8px; margin-top: 10px; }
+            #sohbetMesajGiris {
+                flex: 1;
+                padding: 10px 12px;
+                border-radius: 8px;
+                border: 1px solid #334155;
+                background: #0f172a;
+                color: #e2e8f0;
+                font-size: 13px;
+            }
+            #sohbetGonderBtn {
+                padding: 10px 16px;
+                border-radius: 8px;
+                border: none;
+                background: #22c55e;
+                color: white;
+                font-weight: 600;
+                cursor: pointer;
+            }
             #isFormuOrtusu {
                 display: none;
                 position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -832,6 +1039,21 @@ _ADMIN_HTML = """
             <div id="mevcutSurum" style="margin-top:10px; font-size:13px; color:#94a3b8;"></div>
         </div>
 
+        <div id="sohbetBolumu">
+            <div id="sohbetListesiKutu">
+                <h4>Sohbetler</h4>
+                <div id="sohbetListesi"></div>
+            </div>
+            <div id="sohbetPenceresi">
+                <div id="sohbetBaslik">Bir sürücü seç</div>
+                <div id="sohbetMesajlari"></div>
+                <div id="sohbetGirisSatiri">
+                    <input id="sohbetMesajGiris" placeholder="Mesaj yaz..." onkeypress="if(event.key==='Enter') sohbetGonder()" />
+                    <button id="sohbetGonderBtn" onclick="sohbetGonder()">Gönder</button>
+                </div>
+            </div>
+        </div>
+
         <script>
             var map = L.map('map', {zoomControl: true}).setView([41.0082, 28.9784], 11);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
@@ -866,6 +1088,13 @@ _ADMIN_HTML = """
             ws.onmessage = function(event) {
                 var data = JSON.parse(event.data);
                 if (data.bilgi) { logaYaz(data.bilgi); }
+                if (data.tip === 'sohbet_bildirim') {
+                    logaYaz('[' + data.isim + '] yeni mesaj: ' + data.mesaj);
+                    sohbetleriYukle();
+                    if (secilenSohbetKullanici === data.kullanici_adi) {
+                        sohbetMesajlariniGoster([{gonderen: data.gonderen, mesaj: data.mesaj, zaman: ''}], true);
+                    }
+                }
             };
 
             logaYaz('Sistem hazır. Şoförlerin bağlanması bekleniyor...');
@@ -1037,6 +1266,69 @@ _ADMIN_HTML = """
 
             surucuListesiniYukle();
             mevcutSurumuGoster();
+
+            var secilenSohbetKullanici = null;
+
+            function sohbetleriYukle() {
+                fetch('/admin/api/sohbetler').then(res => res.json()).then(liste => {
+                    var kapsayici = document.getElementById('sohbetListesi');
+                    kapsayici.innerHTML = '';
+                    if (liste.length === 0) {
+                        kapsayici.innerHTML = '<div style="color:#64748b; font-size:13px;">Henüz mesaj yok.</div>';
+                        return;
+                    }
+                    liste.forEach(function(s) {
+                        var satir = document.createElement('div');
+                        satir.className = 'sohbetSatir' + (secilenSohbetKullanici === s.kullanici_adi ? ' secili' : '');
+                        satir.innerHTML =
+                            '<div class="isim">' + s.isim + '</div>' +
+                            '<div class="onizleme">' + (s.son_mesaj || '') + '</div>';
+                        satir.onclick = function() { sohbetAc(s.kullanici_adi, s.isim); };
+                        kapsayici.appendChild(satir);
+                    });
+                });
+            }
+
+            function sohbetAc(kullaniciAdi, isim) {
+                secilenSohbetKullanici = kullaniciAdi;
+                document.getElementById('sohbetBaslik').innerText = isim;
+                fetch('/admin/api/sohbet/' + kullaniciAdi).then(res => res.json()).then(mesajlar => {
+                    sohbetMesajlariniGoster(mesajlar, false);
+                });
+                sohbetleriYukle();
+            }
+
+            function sohbetMesajlariniGoster(mesajlar, ekle) {
+                var kutu = document.getElementById('sohbetMesajlari');
+                if (!ekle) { kutu.innerHTML = ''; }
+                mesajlar.forEach(function(m) {
+                    var balon = document.createElement('div');
+                    balon.className = 'mesajBalon ' + (m.gonderen === 'admin' ? 'mesajAdmin' : 'mesajSurucu');
+                    balon.innerText = m.mesaj;
+                    kutu.appendChild(balon);
+                });
+                kutu.scrollTop = kutu.scrollHeight;
+            }
+
+            function sohbetGonder() {
+                if (!secilenSohbetKullanici) {
+                    alert('Önce soldan bir sohbet seç.');
+                    return;
+                }
+                var giris = document.getElementById('sohbetMesajGiris');
+                var mesaj = giris.value.trim();
+                if (!mesaj) return;
+                fetch('/admin/api/sohbet/' + secilenSohbetKullanici, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mesaj: mesaj})
+                }).then(function() {
+                    sohbetMesajlariniGoster([{gonderen: 'admin', mesaj: mesaj, zaman: ''}], true);
+                    giris.value = '';
+                });
+            }
+
+            sohbetleriYukle();
         </script>
     </body>
     </html>
