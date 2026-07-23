@@ -982,12 +982,16 @@ _ADMIN_HTML = """
                 gap: 12px;
                 padding: 12px;
             }
-            #map {
+            #haritaSarmalayici {
                 flex: 1;
+                position: relative;
                 border-radius: 12px;
                 overflow: hidden;
                 box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-                position: relative;
+            }
+            #map {
+                width: 100%;
+                height: 100%;
             }
             #riskModuBtn {
                 position: absolute;
@@ -1301,7 +1305,8 @@ _ADMIN_HTML = """
         </div>
 
         <div id="anaBolum">
-            <div id="map">
+            <div id="haritaSarmalayici">
+                <div id="map"></div>
                 <button id="riskModuBtn" onclick="riskModunuAcKapat()" title="Riskli bölge ekle">🚓</button>
             </div>
             <div id="logPanel">
