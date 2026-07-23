@@ -1007,6 +1007,17 @@ _ADMIN_HTML = """
                 cursor: pointer;
             }
             #surumSonuc { font-size: 12px; color: #94a3b8; margin-top: 8px; }
+            .surucu-etiket {
+                background: rgba(15, 23, 42, 0.85) !important;
+                color: #f1f5f9 !important;
+                border: 1px solid #3b82f6 !important;
+                border-radius: 6px !important;
+                padding: 2px 8px !important;
+                font-size: 12px !important;
+                font-weight: 600 !important;
+                box-shadow: none !important;
+            }
+            .surucu-etiket::before { display: none !important; }
             #sohbetBolumu {
                 margin: 0 20px 32px;
                 display: flex;
@@ -1232,6 +1243,12 @@ _ADMIN_HTML = """
                 document.getElementById('isFormuOrtusu').style.display = 'flex';
             }
 
+            function mesajAtSayfasinaGit(surucuId, surucuIsim) {
+                sohbetAc(surucuId, surucuIsim);
+                document.getElementById('sohbetBolumu').scrollIntoView({behavior: 'smooth', block: 'start'});
+                document.getElementById('sohbetMesajGiris').focus();
+            }
+
             function isFormuKapat() {
                 document.getElementById('isFormuOrtusu').style.display = 'none';
                 secilenSurucuId = null;
@@ -1268,13 +1285,17 @@ _ADMIN_HTML = """
                         var ikon = (s.status === 'Musait') ? maviIkon : kirmiziIkon;
                         var popupHtml = '<b>' + isim + '</b><br>' +
                             'Durum: ' + s.status + '<br>' +
-                            '<button onclick="isVerFormAc(&quot;' + id + '&quot;, &quot;' + isim + '&quot;)">İş Ver</button>';
+                            '<button onclick="isVerFormAc(&quot;' + id + '&quot;, &quot;' + isim + '&quot;)">İş Ver</button> ' +
+                            '<button onclick="mesajAtSayfasinaGit(&quot;' + id + '&quot;, &quot;' + isim + '&quot;)">Mesaj At</button>';
                         if (surucuMarkerlari[id]) {
                             surucuMarkerlari[id].setLatLng([s.lat, s.lng]);
                             surucuMarkerlari[id].setPopupContent(popupHtml);
                             surucuMarkerlari[id].setIcon(ikon);
                         } else {
-                            surucuMarkerlari[id] = L.marker([s.lat, s.lng], {icon: ikon}).addTo(map).bindPopup(popupHtml);
+                            surucuMarkerlari[id] = L.marker([s.lat, s.lng], {icon: ikon})
+                                .addTo(map)
+                                .bindPopup(popupHtml)
+                                .bindTooltip(isim, {permanent: true, direction: 'top', offset: [0, -8], className: 'surucu-etiket'});
                         }
                     }
                     // Artık bağlı olmayan sürücülerin ikonlarını kaldır
